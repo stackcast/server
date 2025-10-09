@@ -1,0 +1,126 @@
+import { Router, Request, Response } from 'express';
+
+export const orderbookRoutes = Router();
+
+// Get orderbook for a market
+orderbookRoutes.get('/:marketId', (req: Request, res: Response) => {
+  const orderManager = (req as any).orderManager;
+  const { marketId } = req.params;
+  const { positionId } = req.query;
+
+  const market = orderManager.getMarket(marketId);
+
+  if (!market) {
+    return res.status(404).json({
+      success: false,
+      error: 'Market not found'
+    });
+  }
+
+  // If no positionId specified, return both YES and NO orderbooks
+  if (!positionId) {
+    const yesBook = orderManager.getOrderbook(marketId, market.yesPositionId);
+    const noBook = orderManager.getOrderbook(marketId, market.noPositionId);
+
+    return res.json({
+      success: true,
+      market: {
+        marketId: market.marketId,
+        question: market.question
+      },
+      orderbooks: {
+        yes: {
+          positionId: market.yesPositionId,
+          bids: yesBook.bids,
+          asks: yesBook.asks
+        },
+        no: {
+          positionId: market.noPositionId,
+          bids: noBook.bids,
+          asks: noBook.asks
+        }
+      },
+      timestamp: Date.now()
+    });
+  }
+
+  // Return specific position orderbook
+  const orderbook = orderManager.getOrderbook(marketId, positionId as string);
+
+  res.json({
+    success: true,
+    market: {
+      marketId: market.marketId,
+      question: market.question
+    },
+    orderbook: {
+      positionId,
+      bids: orderbook.bids,
+      asks: orderbook.asks
+    },
+    timestamp: Date.now()
+  });
+});
+
+// Get recent trades
+orderbookRoutes.get('/:marketId/trades', (req: Request, res: Response) => {
+  const matchingEngine = (req as any).matchingEngine;
+  const { marketId } = req.params;
+  const limit = parseInt(req.query.limit as string) || 50;
+
+  const trades = matchingEngine.getTrades(marketId, limit);
+
+  res.json({
+    success: true,
+    trades,
+    count: trades.length
+  });
+});
+
+// Get mid-price for a market
+orderbookRoutes.get('/:marketId/price', (req: Request, res: Response) => {
+  const orderManager = (req as any).orderManager;
+  const matchingEngine = (req as any).matchingEngine;
+  const { marketId } = req.params;
+
+  const market = orderManager.getMarket(marketId);
+
+  if (!market) {
+    return res.status(404).json({
+      success: false,
+      error: 'Market not found'
+    });
+  }
+
+  // Get orderbook for YES position
+  const orderbook = orderManager.getOrderbook(marketId, market.yesPositionId);
+
+  // Calculate mid-price
+  let yesPrice = 50; // Default
+  if (orderbook.bids.length > 0 && orderbook.asks.length > 0) {
+    const bestBid = orderbook.bids[0].price;
+    const bestAsk = orderbook.asks[0].price;
+    yesPrice = (bestBid + bestAsk) / 2;
+  } else if (orderbook.bids.length > 0) {
+    yesPrice = orderbook.bids[0].price;
+  } else if (orderbook.asks.length > 0) {
+    yesPrice = orderbook.asks[0].price;
+  }
+
+  // Get last trade price
+  const trades = matchingEngine.getTrades(marketId, 1);
+  const lastTradePrice = trades[0]?.price;
+
+  res.json({
+    success: true,
+    marketId,
+    prices: {
+      yesMid: yesPrice,
+      noMid: 100 - yesPrice,
+      lastTrade: lastTradePrice,
+      bestBid: orderbook.bids[0]?.price,
+      bestAsk: orderbook.asks[0]?.price
+    },
+    timestamp: Date.now()
+  });
+});
