@@ -1,14 +1,14 @@
 import { Order, OrderSide, OrderStatus, Trade } from '../types/order';
-import { OrderManager } from './orderManager';
+import { OrderManagerRedis } from './orderManagerRedis';
 import { randomBytes } from 'crypto';
 
 export class MatchingEngine {
-  private orderManager: OrderManager;
+  private orderManager: OrderManagerRedis;
   private running: boolean = false;
   private matchInterval: Timer | null = null;
   private trades: Map<string, Trade> = new Map();
 
-  constructor(orderManager: OrderManager) {
+  constructor(orderManager: OrderManagerRedis) {
     this.orderManager = orderManager;
   }
 
@@ -20,7 +20,9 @@ export class MatchingEngine {
 
     // Run matching every 100ms
     this.matchInterval = setInterval(() => {
-      this.matchAllMarkets();
+      this.matchAllMarkets().catch(err => {
+        console.error('❌ Matching error:', err);
+      });
     }, 100);
   }
 
@@ -40,22 +42,22 @@ export class MatchingEngine {
   }
 
   // Match all markets
-  private matchAllMarkets(): void {
-    const markets = this.orderManager.getAllMarkets();
+  private async matchAllMarkets(): Promise<void> {
+    const markets = await this.orderManager.getAllMarkets();
 
     for (const market of markets) {
       if (market.resolved) continue;
 
       // Match YES position
-      this.matchMarket(market.marketId, market.yesPositionId);
+      await this.matchMarket(market.marketId, market.yesPositionId);
       // Match NO position
-      this.matchMarket(market.marketId, market.noPositionId);
+      await this.matchMarket(market.marketId, market.noPositionId);
     }
   }
 
   // Match a specific market/position
-  private matchMarket(marketId: string, positionId: string): void {
-    const orders = this.orderManager.getMarketOrders(marketId)
+  private async matchMarket(marketId: string, positionId: string): Promise<void> {
+    const orders = (await this.orderManager.getMarketOrders(marketId))
       .filter(o => o.positionId === positionId &&
                    (o.status === OrderStatus.OPEN || o.status === OrderStatus.PARTIALLY_FILLED));
 
@@ -101,9 +103,11 @@ export class MatchingEngine {
 
       this.trades.set(trade.tradeId, trade);
 
-      // Update orders
-      this.orderManager.fillOrder(buyOrder.orderId, matchSize);
-      this.orderManager.fillOrder(sellOrder.orderId, matchSize);
+      // Update orders (await both fills)
+      await Promise.all([
+        this.orderManager.fillOrder(buyOrder.orderId, matchSize),
+        this.orderManager.fillOrder(sellOrder.orderId, matchSize)
+      ]);
 
       console.log(`🔄 MATCH: ${matchSize} @ ${matchPrice} (${buyOrder.orderId} ↔️ ${sellOrder.orderId})`);
 

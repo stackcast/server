@@ -3,12 +3,11 @@ import { Router, Request, Response } from 'express';
 export const orderbookRoutes = Router();
 
 // Get orderbook for a market
-orderbookRoutes.get('/:marketId', (req: Request, res: Response) => {
-  const orderManager = (req as any).orderManager;
+orderbookRoutes.get('/:marketId', async (req: Request, res: Response) => {
   const { marketId } = req.params;
   const { positionId } = req.query;
 
-  const market = orderManager.getMarket(marketId);
+  const market = await req.orderManager.getMarket(marketId);
 
   if (!market) {
     return res.status(404).json({
@@ -19,8 +18,10 @@ orderbookRoutes.get('/:marketId', (req: Request, res: Response) => {
 
   // If no positionId specified, return both YES and NO orderbooks
   if (!positionId) {
-    const yesBook = orderManager.getOrderbook(marketId, market.yesPositionId);
-    const noBook = orderManager.getOrderbook(marketId, market.noPositionId);
+    const [yesBook, noBook] = await Promise.all([
+      req.orderManager.getOrderbook(marketId, market.yesPositionId),
+      req.orderManager.getOrderbook(marketId, market.noPositionId)
+    ]);
 
     return res.json({
       success: true,
@@ -45,7 +46,7 @@ orderbookRoutes.get('/:marketId', (req: Request, res: Response) => {
   }
 
   // Return specific position orderbook
-  const orderbook = orderManager.getOrderbook(marketId, positionId as string);
+  const orderbook = await req.orderManager.getOrderbook(marketId, positionId as string);
 
   res.json({
     success: true,
@@ -64,11 +65,10 @@ orderbookRoutes.get('/:marketId', (req: Request, res: Response) => {
 
 // Get recent trades
 orderbookRoutes.get('/:marketId/trades', (req: Request, res: Response) => {
-  const matchingEngine = (req as any).matchingEngine;
   const { marketId } = req.params;
   const limit = parseInt(req.query.limit as string) || 50;
 
-  const trades = matchingEngine.getTrades(marketId, limit);
+  const trades = req.matchingEngine.getTrades(marketId, limit);
 
   res.json({
     success: true,
@@ -78,12 +78,10 @@ orderbookRoutes.get('/:marketId/trades', (req: Request, res: Response) => {
 });
 
 // Get mid-price for a market
-orderbookRoutes.get('/:marketId/price', (req: Request, res: Response) => {
-  const orderManager = (req as any).orderManager;
-  const matchingEngine = (req as any).matchingEngine;
+orderbookRoutes.get('/:marketId/price', async (req: Request, res: Response) => {
   const { marketId } = req.params;
 
-  const market = orderManager.getMarket(marketId);
+  const market = await req.orderManager.getMarket(marketId);
 
   if (!market) {
     return res.status(404).json({
@@ -93,7 +91,7 @@ orderbookRoutes.get('/:marketId/price', (req: Request, res: Response) => {
   }
 
   // Get orderbook for YES position
-  const orderbook = orderManager.getOrderbook(marketId, market.yesPositionId);
+  const orderbook = await req.orderManager.getOrderbook(marketId, market.yesPositionId);
 
   // Calculate mid-price
   let yesPrice = 50; // Default
@@ -108,7 +106,7 @@ orderbookRoutes.get('/:marketId/price', (req: Request, res: Response) => {
   }
 
   // Get last trade price
-  const trades = matchingEngine.getTrades(marketId, 1);
+  const trades = req.matchingEngine.getTrades(marketId, 1);
   const lastTradePrice = trades[0]?.price;
 
   res.json({

@@ -3,11 +3,16 @@
 /**
  * Simple test script to demonstrate the API
  * Run: bun scripts/test-api.ts
+ *
+ * NOTE: This script places orders without signatures (optional for testing).
+ * In production, the frontend will include:
+ * - signature: Stacks wallet signature of the order hash
+ * - publicKey: The public key from the wallet (for verification)
  */
 
 const API_URL = 'http://localhost:3000';
 
-interface ApiResponse<T> {
+interface ApiResponse {
   success: boolean;
   [key: string]: unknown;
 }
@@ -33,7 +38,7 @@ interface Market {
   resolved: boolean;
 }
 
-interface MarketResponse extends ApiResponse<Market> {
+interface MarketResponse extends ApiResponse {
   market: Market;
 }
 
@@ -43,7 +48,7 @@ interface OrderbookLevel {
   orderCount: number;
 }
 
-interface OrderbookResponse extends ApiResponse<unknown> {
+interface OrderbookResponse extends ApiResponse {
   orderbook: {
     positionId: string;
     bids: OrderbookLevel[];
@@ -59,12 +64,12 @@ interface Trade {
   timestamp: number;
 }
 
-interface TradesResponse extends ApiResponse<Trade[]> {
+interface TradesResponse extends ApiResponse {
   trades: Trade[];
   count: number;
 }
 
-interface PriceResponse extends ApiResponse<unknown> {
+interface PriceResponse extends ApiResponse {
   prices: {
     yesMid: number;
     noMid: number;
@@ -102,6 +107,9 @@ async function testAPI() {
     console.log();
 
     // 3. Market maker places sell orders
+    // NOTE: Signatures are optional for testing. In production, include:
+    // - signature: wallet signature of order hash
+    // - publicKey: wallet's public key for verification
     console.log('3️⃣  Market maker placing SELL orders...');
     await fetch(`${API_URL}/api/orders`, {
       method: 'POST',
@@ -115,6 +123,8 @@ async function testAPI() {
         size: 5000,
         salt: `${Date.now()}_1`,
         expiration: 999999999
+        // signature: '<wallet_signature>' (optional for testing)
+        // publicKey: '<wallet_public_key>' (required if signature provided)
       })
     });
     console.log('   ✅ Sell order placed: 5000 @ 66');

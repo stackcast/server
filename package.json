@@ -20,12 +20,14 @@
     "typescript": "^5"
   },
   "dependencies": {
+    "@stacks/encryption": "^7.0.2",
     "@stacks/network": "^7.2.0",
     "@stacks/transactions": "^7.2.0",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.3",
     "cors": "^2.8.5",
     "dotenv": "^17.2.3",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "ioredis": "^5.3.2"
   }
 }

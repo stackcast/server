@@ -1,12 +1,12 @@
 import { Router, Request, Response } from 'express';
 import { randomBytes } from 'crypto';
+import { Order, OrderStatus } from '../types/order';
 
 export const marketRoutes = Router();
 
 // Get all markets
-marketRoutes.get('/', (req: Request, res: Response) => {
-  const orderManager = (req as any).orderManager;
-  const markets = orderManager.getAllMarkets();
+marketRoutes.get('/', async (req: Request, res: Response) => {
+  const markets = await req.orderManager.getAllMarkets();
 
   res.json({
     success: true,
@@ -16,11 +16,9 @@ marketRoutes.get('/', (req: Request, res: Response) => {
 });
 
 // Get specific market
-marketRoutes.get('/:marketId', (req: Request, res: Response) => {
-  const orderManager = (req as any).orderManager;
+marketRoutes.get('/:marketId', async (req: Request, res: Response) => {
   const { marketId } = req.params;
-
-  const market = orderManager.getMarket(marketId);
+  const market = await req.orderManager.getMarket(marketId);
 
   if (!market) {
     return res.status(404).json({
@@ -36,8 +34,7 @@ marketRoutes.get('/:marketId', (req: Request, res: Response) => {
 });
 
 // Create new market (would typically be called by admin/oracle adapter)
-marketRoutes.post('/', (req: Request, res: Response) => {
-  const orderManager = (req as any).orderManager;
+marketRoutes.post('/', async (req: Request, res: Response) => {
   const { question, creator, conditionId } = req.body;
 
   if (!question || !creator) {
@@ -65,7 +62,7 @@ marketRoutes.post('/', (req: Request, res: Response) => {
     resolved: false
   };
 
-  orderManager.addMarket(market);
+  await req.orderManager.addMarket(market);
 
   res.json({
     success: true,
@@ -74,12 +71,9 @@ marketRoutes.post('/', (req: Request, res: Response) => {
 });
 
 // Get market stats
-marketRoutes.get('/:marketId/stats', (req: Request, res: Response) => {
-  const orderManager = (req as any).orderManager;
-  const matchingEngine = (req as any).matchingEngine;
+marketRoutes.get('/:marketId/stats', async (req: Request, res: Response) => {
   const { marketId } = req.params;
-
-  const market = orderManager.getMarket(marketId);
+  const market = await req.orderManager.getMarket(marketId);
 
   if (!market) {
     return res.status(404).json({
@@ -88,14 +82,16 @@ marketRoutes.get('/:marketId/stats', (req: Request, res: Response) => {
     });
   }
 
-  const orders = orderManager.getMarketOrders(marketId);
-  const trades = matchingEngine.getTrades(marketId);
+  const orders: Order[] = await req.orderManager.getMarketOrders(marketId);
+  const trades = req.matchingEngine.getTrades(marketId);
 
   res.json({
     success: true,
     stats: {
       totalOrders: orders.length,
-      openOrders: orders.filter(o => o.status === 'OPEN' || o.status === 'PARTIALLY_FILLED').length,
+      openOrders: orders.filter((o: Order) =>
+        o.status === OrderStatus.OPEN || o.status === OrderStatus.PARTIALLY_FILLED
+      ).length,
       totalTrades: trades.length,
       volume24h: market.volume24h,
       lastPrice: trades[0]?.price || market.yesPrice
