@@ -60,14 +60,18 @@ export class MatchingEngine {
   private async matchAllMarkets(): Promise<void> {
     const markets = await this.orderManager.getAllMarkets();
 
-    for (const market of markets) {
-      if (market.resolved) continue;
+    const matchTasks = markets
+      .filter(market => !market.resolved)
+      .flatMap(market => [
+        this.matchMarket(market.marketId, market.yesPositionId),
+        this.matchMarket(market.marketId, market.noPositionId),
+      ]);
 
-      // Match YES position
-      await this.matchMarket(market.marketId, market.yesPositionId);
-      // Match NO position
-      await this.matchMarket(market.marketId, market.noPositionId);
+    if (matchTasks.length === 0) {
+      return;
     }
+
+    await Promise.all(matchTasks);
   }
 
   // Match a specific market/position
@@ -124,15 +128,8 @@ export class MatchingEngine {
         this.orderManager.fillOrder(sellOrder.orderId, matchSize)
       ]);
 
-      buyOrder.remainingSize = Math.max(0, buyOrder.remainingSize - matchSize);
-      buyOrder.filledSize += matchSize;
-      buyOrder.status =
-        buyOrder.remainingSize === 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
-
-      sellOrder.remainingSize = Math.max(0, sellOrder.remainingSize - matchSize);
-      sellOrder.filledSize += matchSize;
-      sellOrder.status =
-        sellOrder.remainingSize === 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
+      this.updateOrderState(buyOrder, matchSize);
+      this.updateOrderState(sellOrder, matchSize);
 
       console.log(`🔄 MATCH: ${matchSize} @ ${matchPrice} (${buyOrder.orderId} ↔️ ${sellOrder.orderId})`);
 
@@ -167,6 +164,13 @@ export class MatchingEngine {
       tradeId: `trade_${Date.now()}_${randomBytes(8).toString('hex')}`,
       timestamp: Date.now()
     };
+  }
+
+  private updateOrderState(order: Order, matchSize: number): void {
+    order.remainingSize = Math.max(0, order.remainingSize - matchSize);
+    order.filledSize += matchSize;
+    order.status =
+      order.remainingSize === 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
   }
 
   // Get recent trades
