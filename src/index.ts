@@ -5,7 +5,10 @@ import { marketRoutes } from './routes/markets';
 import { orderRoutes } from './routes/orders';
 import { orderbookRoutes } from './routes/orderbook';
 import { MatchingEngine } from './services/matchingEngine';
-import { OrderManager } from './services/orderManager';
+import { OrderManagerRedis } from './services/orderManagerRedis';
+import { StacksMonitor } from './services/stacksMonitor';
+import { StacksSettlementService } from './services/stacksSettlement';
+import './types/express'; // Extend Express types
 
 dotenv.config();
 
@@ -17,16 +20,26 @@ app.use(cors());
 app.use(express.json());
 
 // Initialize services
-const orderManager = new OrderManager();
-const matchingEngine = new MatchingEngine(orderManager);
+const networkType = (process.env.STACKS_NETWORK as 'mainnet' | 'testnet' | 'devnet') || 'testnet';
 
-// Start matching engine
+const orderManager = new OrderManagerRedis();
+const settlementService = new StacksSettlementService({
+  network: networkType,
+  contractIdentifier: process.env.CTF_EXCHANGE_ADDRESS,
+  operatorPrivateKey: process.env.STACKS_OPERATOR_PRIVATE_KEY,
+  apiUrl: process.env.STACKS_API_URL,
+});
+const matchingEngine = new MatchingEngine(orderManager, settlementService);
+const stacksMonitor = new StacksMonitor(orderManager, networkType);
+
+// Start services
 matchingEngine.start();
+stacksMonitor.start();
 
 // Attach services to request
-app.use((req, res, next) => {
-  (req as any).orderManager = orderManager;
-  (req as any).matchingEngine = matchingEngine;
+app.use((req, _res, next) => {
+  req.orderManager = orderManager;
+  req.matchingEngine = matchingEngine;
   next();
 });
 
@@ -36,18 +49,22 @@ app.use('/api/orders', orderRoutes);
 app.use('/api/orderbook', orderbookRoutes);
 
 // Health check
-app.get('/health', (req, res) => {
+app.get('/health', async (_req, res) => {
+  const orderCount = await orderManager.getOrderCount();
   res.json({
     status: 'ok',
     timestamp: new Date().toISOString(),
-    orderCount: orderManager.getOrderCount(),
-    matchingEngineRunning: matchingEngine.isRunning()
+    orderCount,
+    matchingEngineRunning: matchingEngine.isRunning(),
+    stacksMonitorRunning: stacksMonitor.isRunning(),
+    currentBlockHeight: stacksMonitor.getCurrentBlockHeight()
   });
 });
 
 app.listen(PORT, () => {
   console.log(`🚀 Stackcast CLOB API running on port ${PORT}`);
   console.log(`📊 Matching engine started`);
+  console.log(`⛓️  Stacks monitor started`);
 });
 
-export { orderManager, matchingEngine };
+export { orderManager, matchingEngine, stacksMonitor, settlementService };

@@ -1,5 +1,11 @@
-import { Order, OrderSide, OrderStatus, Orderbook, OrderbookLevel, Market } from '../types/order';
-import { randomBytes } from 'crypto';
+import {
+  Order,
+  OrderSide,
+  OrderStatus,
+  OrderbookLevel,
+  Market,
+} from "../types/order";
+import { randomBytes } from "crypto";
 
 export class OrderManager {
   private orders: Map<string, Order> = new Map();
@@ -8,7 +14,18 @@ export class OrderManager {
   private markets: Map<string, Market> = new Map();
 
   // Add a new order
-  addOrder(order: Omit<Order, 'orderId' | 'filledSize' | 'remainingSize' | 'status' | 'createdAt' | 'updatedAt'>): Order {
+
+  addOrder(
+    order: Omit<
+      Order,
+      | "orderId"
+      | "filledSize"
+      | "remainingSize"
+      | "status"
+      | "createdAt"
+      | "updatedAt"
+    >
+  ): Order {
     const orderId = this.generateOrderId();
     const now = Date.now();
 
@@ -19,7 +36,7 @@ export class OrderManager {
       remainingSize: order.size,
       status: OrderStatus.OPEN,
       createdAt: now,
-      updatedAt: now
+      updatedAt: now,
     };
 
     this.orders.set(orderId, fullOrder);
@@ -36,7 +53,9 @@ export class OrderManager {
     }
     this.userOrders.get(order.maker)!.add(orderId);
 
-    console.log(`📝 New order: ${orderId} - ${order.side} ${order.size} @ ${order.price}`);
+    console.log(
+      `📝 New order: ${orderId} - ${order.side} ${order.size} @ ${order.price}`
+    );
     return fullOrder;
   }
 
@@ -51,7 +70,7 @@ export class OrderManager {
     if (!orderIds) return [];
 
     return Array.from(orderIds)
-      .map(id => this.orders.get(id))
+      .map((id) => this.orders.get(id))
       .filter((order): order is Order => order !== undefined);
   }
 
@@ -61,7 +80,7 @@ export class OrderManager {
     if (!orderIds) return [];
 
     return Array.from(orderIds)
-      .map(id => this.orders.get(id))
+      .map((id) => this.orders.get(id))
       .filter((order): order is Order => order !== undefined);
   }
 
@@ -79,7 +98,9 @@ export class OrderManager {
       console.log(`✅ Order filled: ${orderId}`);
     } else {
       order.status = OrderStatus.PARTIALLY_FILLED;
-      console.log(`⚡ Order partially filled: ${orderId} (${order.filledSize}/${order.size})`);
+      console.log(
+        `⚡ Order partially filled: ${orderId} (${order.filledSize}/${order.size})`
+      );
     }
 
     return true;
@@ -90,7 +111,10 @@ export class OrderManager {
     const order = this.orders.get(orderId);
     if (!order) return false;
 
-    if (order.status === OrderStatus.FILLED || order.status === OrderStatus.CANCELLED) {
+    if (
+      order.status === OrderStatus.FILLED ||
+      order.status === OrderStatus.CANCELLED
+    ) {
       return false;
     }
 
@@ -101,20 +125,32 @@ export class OrderManager {
   }
 
   // Generate orderbook for a market
-  getOrderbook(marketId: string, positionId: string): { bids: OrderbookLevel[], asks: OrderbookLevel[] } {
-    const orders = this.getMarketOrders(marketId)
-      .filter(o => o.positionId === positionId &&
-                   (o.status === OrderStatus.OPEN || o.status === OrderStatus.PARTIALLY_FILLED));
+  getOrderbook(
+    marketId: string,
+    positionId: string
+  ): { bids: OrderbookLevel[]; asks: OrderbookLevel[] } {
+    const orders = this.getMarketOrders(marketId).filter(
+      (o) =>
+        o.positionId === positionId &&
+        (o.status === OrderStatus.OPEN ||
+          o.status === OrderStatus.PARTIALLY_FILLED)
+    );
 
     // Aggregate orders by price level
-    const bids = this.aggregateOrders(orders.filter(o => o.side === OrderSide.BUY), true);
-    const asks = this.aggregateOrders(orders.filter(o => o.side === OrderSide.SELL), false);
+    const bids = this.aggregateOrders(
+      orders.filter((o) => o.side === OrderSide.BUY),
+      true
+    );
+    const asks = this.aggregateOrders(
+      orders.filter((o) => o.side === OrderSide.SELL),
+      false
+    );
 
     return { bids, asks };
   }
 
   private aggregateOrders(orders: Order[], isBid: boolean): OrderbookLevel[] {
-    const levels = new Map<number, { size: number, count: number }>();
+    const levels = new Map<number, { size: number; count: number }>();
 
     for (const order of orders) {
       const existing = levels.get(order.price) || { size: 0, count: 0 };
@@ -126,11 +162,13 @@ export class OrderManager {
     const result = Array.from(levels.entries()).map(([price, data]) => ({
       price,
       size: data.size,
-      orderCount: data.count
+      orderCount: data.count,
     }));
 
     // Sort: bids high to low, asks low to high
-    return result.sort((a, b) => isBid ? b.price - a.price : a.price - b.price);
+    return result.sort((a, b) =>
+      isBid ? b.price - a.price : a.price - b.price
+    );
   }
 
   // Market management
@@ -153,6 +191,6 @@ export class OrderManager {
   }
 
   private generateOrderId(): string {
-    return `order_${Date.now()}_${randomBytes(8).toString('hex')}`;
+    return `order_${Date.now()}_${randomBytes(8).toString("hex")}`;
   }
 }

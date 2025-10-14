@@ -1,11 +1,11 @@
-import { Router, Request, Response } from 'express';
-import { OrderSide } from '../types/order';
+import { Router, Request, Response } from "express";
+import { Order, OrderSide } from "../types/order";
+import { verifyOrderSignatureMiddleware } from "../utils/signatureVerification";
 
 export const orderRoutes = Router();
 
 // Create new order
-orderRoutes.post('/', (req: Request, res: Response) => {
-  const orderManager = (req as any).orderManager;
+orderRoutes.post("/", async (req: Request, res: Response) => {
   const {
     maker,
     marketId,
@@ -16,49 +16,86 @@ orderRoutes.post('/', (req: Request, res: Response) => {
     size,
     salt,
     expiration,
-    signature
+    signature,
+    publicKey,
   } = req.body;
 
   // Validation
-  if (!maker || !marketId || !positionId || !side || price === undefined || size === undefined) {
+  if (
+    !maker ||
+    !marketId ||
+    !positionId ||
+    !side ||
+    price === undefined ||
+    size === undefined
+  ) {
     return res.status(400).json({
       success: false,
-      error: 'Missing required fields'
+      error: "Missing required fields",
     });
   }
 
   if (side !== OrderSide.BUY && side !== OrderSide.SELL) {
     return res.status(400).json({
       success: false,
-      error: 'Invalid side. Must be BUY or SELL'
+      error: "Invalid side. Must be BUY or SELL",
     });
   }
 
   if (price <= 0 || price >= 100) {
     return res.status(400).json({
       success: false,
-      error: 'Price must be between 0 and 100'
+      error: "Price must be between 0 and 100",
     });
   }
 
   if (size <= 0) {
     return res.status(400).json({
       success: false,
-      error: 'Size must be positive'
+      error: "Size must be positive",
     });
   }
 
   // Check market exists
-  const market = orderManager.getMarket(marketId);
+  const market = await req.orderManager.getMarket(marketId);
   if (!market) {
     return res.status(404).json({
       success: false,
-      error: 'Market not found'
+      error: "Market not found",
     });
   }
 
+  // Verify signature if provided (optional for now, will be required in production)
+  if (signature) {
+    if (!publicKey) {
+      return res.status(400).json({
+        success: false,
+        error: "publicKey is required when signature is provided",
+      });
+    }
+
+    const signatureVerification = await verifyOrderSignatureMiddleware({
+      maker,
+      taker: maker, // For limit orders, taker is same as maker
+      positionId,
+      makerAmount: size,
+      takerAmount: Math.floor(size * price), // Calculate taker amount from price
+      salt: salt || `${Date.now()}`,
+      expiration: expiration || 999999999,
+      signature,
+      publicKey,
+    });
+
+    if (!signatureVerification.valid) {
+      return res.status(401).json({
+        success: false,
+        error: signatureVerification.error || "Invalid signature",
+      });
+    }
+  }
+
   try {
-    const order = orderManager.addOrder({
+    const order = await req.orderManager.addOrder({
       maker,
       marketId,
       conditionId: conditionId || market.conditionId,
@@ -68,78 +105,74 @@ orderRoutes.post('/', (req: Request, res: Response) => {
       size,
       salt: salt || `${Date.now()}`,
       expiration: expiration || 999999999, // Very high block number
-      signature
+      signature,
     });
 
     res.json({
       success: true,
-      order
+      order,
     });
   } catch (error: any) {
     res.status(500).json({
       success: false,
-      error: error.message
+      error: error.message,
     });
   }
 });
 
 // Get order by ID
-orderRoutes.get('/:orderId', (req: Request, res: Response) => {
-  const orderManager = (req as any).orderManager;
+orderRoutes.get("/:orderId", async (req: Request, res: Response) => {
   const { orderId } = req.params;
-
-  const order = orderManager.getOrder(orderId);
+  const order = await req.orderManager.getOrder(orderId);
 
   if (!order) {
     return res.status(404).json({
       success: false,
-      error: 'Order not found'
+      error: "Order not found",
     });
   }
 
   res.json({
     success: true,
-    order
+    order,
   });
 });
 
 // Get user's orders
-orderRoutes.get('/user/:address', (req: Request, res: Response) => {
-  const orderManager = (req as any).orderManager;
+orderRoutes.get("/user/:address", async (req: Request, res: Response) => {
   const { address } = req.params;
   const { status, marketId } = req.query;
 
-  let orders = orderManager.getUserOrders(address);
+  let orders = await req.orderManager.getUserOrders(address);
 
   // Filter by status
   if (status) {
-    orders = orders.filter((o: any) => o.status === status);
+    orders = orders.filter((o: Order) => o.status === status);
   }
 
   // Filter by market
   if (marketId) {
-    orders = orders.filter((o: any) => o.marketId === marketId);
+    orders = orders.filter((o: Order) => o.marketId === marketId);
   }
 
   res.json({
     success: true,
     orders,
-    count: orders.length
+    count: orders.length,
   });
 });
 
 // Cancel order
-orderRoutes.delete('/:orderId', (req: Request, res: Response) => {
-  const orderManager = (req as any).orderManager;
+orderRoutes.delete("/:orderId", async (req: Request, res: Response) => {
   const { orderId } = req.params;
   const { maker } = req.body; // In production, verify signature
 
-  const order = orderManager.getOrder(orderId);
+  const order = await req.orderManager.getOrder(orderId);
 
   if (!order) {
     return res.status(404).json({
       success: false,
-      error: 'Order not found'
+      error: "Order not found",
     });
   }
 
@@ -147,21 +180,21 @@ orderRoutes.delete('/:orderId', (req: Request, res: Response) => {
   if (maker && order.maker !== maker) {
     return res.status(403).json({
       success: false,
-      error: 'Not authorized to cancel this order'
+      error: "Not authorized to cancel this order",
     });
   }
 
-  const cancelled = orderManager.cancelOrder(orderId);
+  const cancelled = await req.orderManager.cancelOrder(orderId);
 
   if (!cancelled) {
     return res.status(400).json({
       success: false,
-      error: 'Cannot cancel this order (already filled or cancelled)'
+      error: "Cannot cancel this order (already filled or cancelled)",
     });
   }
 
   res.json({
     success: true,
-    message: 'Order cancelled'
+    message: "Order cancelled",
   });
 });
