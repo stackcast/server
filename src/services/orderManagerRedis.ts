@@ -123,38 +123,73 @@ export class OrderManagerRedis {
   }
 
   async fillOrder(orderId: string, fillSize: number): Promise<boolean> {
-    const order = await this.getOrder(orderId);
-    if (!order) return false;
-
-    const newFilledSize = order.filledSize + fillSize;
-    const newRemainingSize = order.remainingSize - fillSize;
-    const newStatus =
-      newRemainingSize <= 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
-
-    const pipeline = redis.pipeline();
-
-    // Update order fields
-    pipeline.hset(`order:${orderId}`, {
-      filledSize: newFilledSize,
-      remainingSize: newRemainingSize,
-      status: newStatus.toString(),
-      updatedAt: Date.now(),
-    });
-
-    // Remove from orderbook if fully filled
-    if (newRemainingSize <= 0) {
-      const bookKey = `orderbook:${order.marketId}:${order.positionId}:${order.side.toLowerCase()}`;
-      pipeline.zrem(bookKey, orderId);
-
-      console.log(`✅ Order filled: ${orderId}`);
-    } else {
-      console.log(
-        `⚡ Order partially filled: ${orderId} (${newFilledSize}/${order.size})`
-      );
+    if (fillSize <= 0) {
+      return false;
     }
 
-    await pipeline.exec();
-    return true;
+    const orderKey = `order:${orderId}`;
+    const maxAttempts = 5;
+
+    for (let attempt = 0; attempt < maxAttempts; attempt++) {
+      await redis.watch(orderKey);
+
+      const orderData = await redis.hgetall(orderKey);
+      if (Object.keys(orderData).length === 0) {
+        await redis.unwatch();
+        return false;
+      }
+
+      const order = this.parseOrder(orderData);
+
+      if (
+        order.status === OrderStatus.FILLED ||
+        order.status === OrderStatus.CANCELLED ||
+        order.status === OrderStatus.EXPIRED
+      ) {
+        await redis.unwatch();
+        return false;
+      }
+
+      if (fillSize > order.remainingSize) {
+        await redis.unwatch();
+        return false;
+      }
+
+      const newFilledSize = order.filledSize + fillSize;
+      const newRemainingSize = order.remainingSize - fillSize;
+      const newStatus =
+        newRemainingSize <= 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
+      const bookKey = `orderbook:${order.marketId}:${order.positionId}:${order.side.toLowerCase()}`;
+
+      const transaction = redis.multi();
+
+      transaction.hset(orderKey, {
+        filledSize: newFilledSize,
+        remainingSize: newRemainingSize,
+        status: newStatus.toString(),
+        updatedAt: Date.now(),
+      });
+
+      if (newRemainingSize <= 0) {
+        transaction.zrem(bookKey, orderId);
+      }
+
+      const execResult = await transaction.exec();
+      if (execResult !== null) {
+        if (newRemainingSize <= 0) {
+          console.log(`✅ Order filled: ${orderId}`);
+        } else {
+          console.log(
+            `⚡ Order partially filled: ${orderId} (${newFilledSize}/${order.size})`
+          );
+        }
+        return true;
+      }
+    }
+
+    await redis.unwatch();
+    console.warn(`⚠️ Failed to fill order due to concurrent updates: ${orderId}`);
+    return false;
   }
 
   async cancelOrder(orderId: string): Promise<boolean> {

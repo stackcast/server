@@ -7,6 +7,7 @@ import { orderbookRoutes } from './routes/orderbook';
 import { MatchingEngine } from './services/matchingEngine';
 import { OrderManagerRedis } from './services/orderManagerRedis';
 import { StacksMonitor } from './services/stacksMonitor';
+import { StacksSettlementService } from './services/stacksSettlement';
 import './types/express'; // Extend Express types
 
 dotenv.config();
@@ -19,12 +20,17 @@ app.use(cors());
 app.use(express.json());
 
 // Initialize services
+const networkType = (process.env.STACKS_NETWORK as 'mainnet' | 'testnet' | 'devnet') || 'testnet';
+
 const orderManager = new OrderManagerRedis();
-const matchingEngine = new MatchingEngine(orderManager);
-const stacksMonitor = new StacksMonitor(
-  orderManager,
-  (process.env.STACKS_NETWORK as 'mainnet' | 'testnet' | 'devnet') || 'testnet'
-);
+const settlementService = new StacksSettlementService({
+  network: networkType,
+  contractIdentifier: process.env.CTF_EXCHANGE_ADDRESS,
+  operatorPrivateKey: process.env.STACKS_OPERATOR_PRIVATE_KEY,
+  apiUrl: process.env.STACKS_API_URL,
+});
+const matchingEngine = new MatchingEngine(orderManager, settlementService);
+const stacksMonitor = new StacksMonitor(orderManager, networkType);
 
 // Start services
 matchingEngine.start();
@@ -61,4 +67,4 @@ app.listen(PORT, () => {
   console.log(`⛓️  Stacks monitor started`);
 });
 
-export { orderManager, matchingEngine, stacksMonitor };
+export { orderManager, matchingEngine, stacksMonitor, settlementService };

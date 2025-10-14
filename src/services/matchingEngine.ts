@@ -1,5 +1,6 @@
 import { Order, OrderSide, OrderStatus, Trade } from '../types/order';
 import { OrderManagerRedis } from './orderManagerRedis';
+import { StacksSettlementService } from './stacksSettlement';
 import { randomBytes } from 'crypto';
 
 export class MatchingEngine {
@@ -7,9 +8,11 @@ export class MatchingEngine {
   private running: boolean = false;
   private matchInterval: Timer | null = null;
   private trades: Map<string, Trade> = new Map();
+  private settlementService?: StacksSettlementService;
 
-  constructor(orderManager: OrderManagerRedis) {
+  constructor(orderManager: OrderManagerRedis, settlementService?: StacksSettlementService) {
     this.orderManager = orderManager;
+    this.settlementService = settlementService;
   }
 
   start(): void {
@@ -111,12 +114,28 @@ export class MatchingEngine {
 
       console.log(`🔄 MATCH: ${matchSize} @ ${matchPrice} (${buyOrder.orderId} ↔️ ${sellOrder.orderId})`);
 
+      if (this.settlementService?.isEnabled()) {
+        try {
+          const txId = await this.settlementService.submitFill({
+            trade,
+            makerOrder: sellOrder,
+            takerOrder: buyOrder,
+            fillAmount: matchSize,
+            executionPrice: matchPrice,
+          });
+
+          if (txId) {
+            const settledTrade: Trade = { ...trade, txHash: txId };
+            this.trades.set(trade.tradeId, settledTrade);
+          }
+        } catch (error) {
+          console.error('❌ Settlement broadcast failed:', error);
+        }
+      }
+
       // Move to next order if filled
       if (buyOrder.remainingSize <= 0) buyIndex++;
       if (sellOrder.remainingSize <= 0) sellIndex++;
-
-      // TODO: Send match to blockchain for settlement
-      // This would call the CTFExchange.fill-order function
     }
   }
 
