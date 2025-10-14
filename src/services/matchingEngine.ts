@@ -112,6 +112,16 @@ export class MatchingEngine {
         this.orderManager.fillOrder(sellOrder.orderId, matchSize)
       ]);
 
+      buyOrder.remainingSize = Math.max(0, buyOrder.remainingSize - matchSize);
+      buyOrder.filledSize += matchSize;
+      buyOrder.status =
+        buyOrder.remainingSize === 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
+
+      sellOrder.remainingSize = Math.max(0, sellOrder.remainingSize - matchSize);
+      sellOrder.filledSize += matchSize;
+      sellOrder.status =
+        sellOrder.remainingSize === 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
+
       console.log(`🔄 MATCH: ${matchSize} @ ${matchPrice} (${buyOrder.orderId} ↔️ ${sellOrder.orderId})`);
 
       if (this.settlementService?.isEnabled()) {
