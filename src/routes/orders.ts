@@ -10,7 +10,8 @@ orderRoutes.post("/", async (req: Request, res: Response) => {
     maker,
     marketId,
     conditionId,
-    positionId,
+    makerPositionId,
+    takerPositionId,
     side,
     price,
     size,
@@ -24,7 +25,6 @@ orderRoutes.post("/", async (req: Request, res: Response) => {
   if (
     !maker ||
     !marketId ||
-    !positionId ||
     !side ||
     price === undefined ||
     size === undefined
@@ -34,6 +34,21 @@ orderRoutes.post("/", async (req: Request, res: Response) => {
       error: "Missing required fields",
     });
   }
+
+  // Get market to derive position IDs if not provided
+  const market = await req.orderManager.getMarket(marketId);
+  if (!market) {
+    return res.status(404).json({
+      success: false,
+      error: "Market not found",
+    });
+  }
+
+  // Derive position IDs based on side if not explicitly provided
+  const finalMakerPositionId = makerPositionId ||
+    (side === OrderSide.BUY ? market.yesPositionId : market.noPositionId);
+  const finalTakerPositionId = takerPositionId ||
+    (side === OrderSide.BUY ? market.noPositionId : market.yesPositionId);
 
   if (side !== OrderSide.BUY && side !== OrderSide.SELL) {
     return res.status(400).json({
@@ -56,15 +71,6 @@ orderRoutes.post("/", async (req: Request, res: Response) => {
     });
   }
 
-  // Check market exists
-  const market = await req.orderManager.getMarket(marketId);
-  if (!market) {
-    return res.status(404).json({
-      success: false,
-      error: "Market not found",
-    });
-  }
-
   // Verify signature if provided (optional for now, will be required in production)
   if (signature) {
     if (!publicKey) {
@@ -77,7 +83,8 @@ orderRoutes.post("/", async (req: Request, res: Response) => {
     const signatureVerification = await verifyOrderSignatureMiddleware({
       maker,
       taker: maker, // For limit orders, taker is same as maker
-      positionId,
+      makerPositionId: finalMakerPositionId,
+      takerPositionId: finalTakerPositionId,
       makerAmount: size,
       takerAmount: Math.floor(size * price), // Calculate taker amount from price
       salt: salt || `${Date.now()}`,
@@ -99,7 +106,8 @@ orderRoutes.post("/", async (req: Request, res: Response) => {
       maker,
       marketId,
       conditionId: conditionId || market.conditionId,
-      positionId,
+      makerPositionId: finalMakerPositionId,
+      takerPositionId: finalTakerPositionId,
       side,
       price,
       size,

@@ -17,7 +17,8 @@ export interface Order {
   maker: string; // Principal address
   marketId: string;
   conditionId: string;
-  positionId: string; // YES or NO token ID
+  makerPositionId: string; // Maker's position ID (what they're selling)
+  takerPositionId: string; // Taker's position ID (what they're buying)
   side: OrderSide;
   price: number; // In cents (e.g., 66 = $0.66)
   size: number; // Token amount

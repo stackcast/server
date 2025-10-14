@@ -92,15 +92,18 @@ export class StacksSettlementService {
     const salt = this.parseUint(makerOrder.salt ?? takerOrder.salt);
     const expiration = this.parseUint(makerOrder.expiration ?? takerOrder.expiration);
 
+    // Contract expects: maker, maker-position-id, maker-amount, maker-signature,
+    //                   taker, taker-position-id, taker-amount, taker-signature,
+    //                   salt, expiration, fill-amount
     const functionArgs = [
       standardPrincipalCV(makerOrder.maker),
-      bufferCV(this.positionIdToBuffer(makerOrder.positionId)),
+      bufferCV(this.positionIdToBuffer(makerOrder.makerPositionId)),
       uintCV(makerAmount),
+      bufferCV(Buffer.from(makerOrder.signature || '0'.repeat(130), 'hex')), // Maker signature
       standardPrincipalCV(takerOrder.maker),
-      bufferCV(
-        this.positionIdToBuffer(this.resolveTakerPositionId(makerOrder.positionId, takerOrder.positionId))
-      ),
+      bufferCV(this.positionIdToBuffer(takerOrder.makerPositionId)), // Taker's position is their maker position
       uintCV(takerAmount),
+      bufferCV(Buffer.from(takerOrder.signature || '0'.repeat(130), 'hex')), // Taker signature
       uintCV(salt),
       uintCV(expiration),
       uintCV(fill),

@@ -1,4 +1,6 @@
-import { verifyMessageSignatureRsv, hashMessage } from "@stacks/encryption";
+import { verifyMessageSignatureRsv } from "@stacks/encryption";
+import { serializeCV, principalCV, uintCV } from "@stacks/transactions";
+import { createHash } from "crypto";
 
 /**
  * Compute order hash matching the Clarity contract's hash-order function
@@ -10,10 +12,13 @@ import { verifyMessageSignatureRsv, hashMessage } from "@stacks/encryption";
  *       (concat
  *         (concat
  *           (concat
- *             (unwrap-panic (to-consensus-buff? maker))
- *             (unwrap-panic (to-consensus-buff? taker))
+ *             (concat
+ *               (unwrap-panic (to-consensus-buff? maker))
+ *               (unwrap-panic (to-consensus-buff? taker))
+ *             )
+ *             maker-position-id
  *           )
- *           position-id
+ *           taker-position-id
  *         )
  *         (unwrap-panic (to-consensus-buff? maker-amount))
  *       )
@@ -27,27 +32,39 @@ import { verifyMessageSignatureRsv, hashMessage } from "@stacks/encryption";
 export function computeOrderHash(
   maker: string,
   taker: string,
-  positionId: string,
+  makerPositionId: string,
+  takerPositionId: string,
   makerAmount: number,
   takerAmount: number,
   salt: string,
   expiration: number
 ): Buffer {
-  // Create a deterministic order message
-  // This should match the frontend's computeOrderHash function
-  const orderMessage = JSON.stringify({
-    maker,
-    taker,
-    positionId,
-    makerAmount,
-    takerAmount,
-    salt,
-    expiration,
-  });
+  // Serialize principals and integers to consensus buffer format (SIP-005)
+  // Position IDs are raw buffers (NOT serialized as CVs in the contract)
+  const makerBuff = Buffer.from(serializeCV(principalCV(maker)));
+  const takerBuff = Buffer.from(serializeCV(principalCV(taker)));
+  const makerPositionIdBuff = Buffer.from(makerPositionId, "hex");
+  const takerPositionIdBuff = Buffer.from(takerPositionId, "hex");
+  const makerAmountBuff = Buffer.from(serializeCV(uintCV(makerAmount)));
+  const takerAmountBuff = Buffer.from(serializeCV(uintCV(takerAmount)));
+  const saltBuff = Buffer.from(serializeCV(uintCV(BigInt(salt))));
+  const expirationBuff = Buffer.from(serializeCV(uintCV(expiration)));
 
-  // Hash the message using Stacks' hashMessage function
-  const hash = hashMessage(orderMessage);
-  return Buffer.from(hash);
+  // Concatenate all buffers in the same order as Clarity contract
+  const concatenated = Buffer.concat([
+    makerBuff,
+    takerBuff,
+    makerPositionIdBuff,
+    takerPositionIdBuff,
+    makerAmountBuff,
+    takerAmountBuff,
+    saltBuff,
+    expirationBuff,
+  ]);
+
+  // Compute SHA256 hash
+  const hash = createHash("sha256").update(concatenated).digest();
+  return hash;
 }
 
 /**
@@ -92,7 +109,8 @@ export function verifyOrderSignature(
 export async function verifyOrderSignatureMiddleware(orderData: {
   maker: string;
   taker?: string;
-  positionId: string;
+  makerPositionId: string;
+  takerPositionId: string;
   makerAmount: number;
   takerAmount: number;
   salt: string;
@@ -103,7 +121,8 @@ export async function verifyOrderSignatureMiddleware(orderData: {
   const {
     maker,
     taker,
-    positionId,
+    makerPositionId,
+    takerPositionId,
     makerAmount,
     takerAmount,
     salt,
@@ -125,6 +144,10 @@ export async function verifyOrderSignatureMiddleware(orderData: {
     return { valid: false, error: "Maker address is required" };
   }
 
+  if (!makerPositionId || !takerPositionId) {
+    return { valid: false, error: "Both position IDs are required" };
+  }
+
   // Use maker as taker if taker is not specified (for limit orders)
   const takerAddress = taker || maker;
 
@@ -133,7 +156,8 @@ export async function verifyOrderSignatureMiddleware(orderData: {
     const orderHash = computeOrderHash(
       maker,
       takerAddress,
-      positionId,
+      makerPositionId,
+      takerPositionId,
       makerAmount,
       takerAmount,
       salt,
