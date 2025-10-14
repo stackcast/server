@@ -9,6 +9,7 @@ export class MatchingEngine {
   private matchInterval: Timer | null = null;
   private trades: Map<string, Trade> = new Map();
   private settlementService?: StacksSettlementService;
+  private isMatching = false;
 
   constructor(orderManager: OrderManagerRedis, settlementService?: StacksSettlementService) {
     this.orderManager = orderManager;
@@ -22,10 +23,20 @@ export class MatchingEngine {
     console.log('🎯 Matching engine started');
 
     // Run matching every 100ms
-    this.matchInterval = setInterval(() => {
-      this.matchAllMarkets().catch(err => {
+    this.matchInterval = setInterval(async () => {
+      if (this.isMatching) {
+        return;
+      }
+
+      this.isMatching = true;
+
+      try {
+        await this.matchAllMarkets();
+      } catch (err) {
         console.error('❌ Matching error:', err);
-      });
+      } finally {
+        this.isMatching = false;
+      }
     }, 100);
   }
 
@@ -37,6 +48,7 @@ export class MatchingEngine {
       clearInterval(this.matchInterval);
       this.matchInterval = null;
     }
+    this.isMatching = false;
     console.log('⏸️  Matching engine stopped');
   }
 
