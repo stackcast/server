@@ -75,9 +75,9 @@ export class MatchingEngine {
   }
 
   // Match a specific market/position
-  private async matchMarket(marketId: string, positionId: string): Promise<void> {
+  private async matchMarket(marketId: string, makerPositionId: string): Promise<void> {
     const orders = (await this.orderManager.getMarketOrders(marketId))
-      .filter(o => o.positionId === positionId &&
+      .filter(o => o.makerPositionId === makerPositionId &&
                    (o.status === OrderStatus.OPEN || o.status === OrderStatus.PARTIALLY_FILLED));
 
     // Separate into buy and sell orders
@@ -110,7 +110,8 @@ export class MatchingEngine {
       const trade = this.createTrade({
         marketId,
         conditionId: buyOrder.conditionId,
-        positionId,
+        makerPositionId: sellOrder.makerPositionId,
+        takerPositionId: sellOrder.takerPositionId,
         maker: sellOrder.maker,
         taker: buyOrder.maker,
         price: matchPrice,

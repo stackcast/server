@@ -10,7 +10,8 @@ orderRoutes.post("/", async (req: Request, res: Response) => {
     maker,
     marketId,
     conditionId,
-    positionId,
+    makerPositionId,
+    takerPositionId,
     side,
     price,
     size,
@@ -24,7 +25,6 @@ orderRoutes.post("/", async (req: Request, res: Response) => {
   if (
     !maker ||
     !marketId ||
-    !positionId ||
     !side ||
     price === undefined ||
     size === undefined
@@ -56,7 +56,7 @@ orderRoutes.post("/", async (req: Request, res: Response) => {
     });
   }
 
-  // Check market exists
+  // Get market to derive position IDs if not provided
   const market = await req.orderManager.getMarket(marketId);
   if (!market) {
     return res.status(404).json({
@@ -64,6 +64,14 @@ orderRoutes.post("/", async (req: Request, res: Response) => {
       error: "Market not found",
     });
   }
+
+  // Derive position IDs based on side if not explicitly provided
+  // BUY side: maker gets YES tokens, taker gets NO tokens
+  // SELL side: maker gets NO tokens, taker gets YES tokens
+  const finalMakerPositionId = makerPositionId ||
+    (side === OrderSide.BUY ? market.yesPositionId : market.noPositionId);
+  const finalTakerPositionId = takerPositionId ||
+    (side === OrderSide.BUY ? market.noPositionId : market.yesPositionId);
 
   // Verify signature (REQUIRED for production security)
   if (!signature || !publicKey) {
@@ -76,7 +84,8 @@ orderRoutes.post("/", async (req: Request, res: Response) => {
   const signatureVerification = await verifyOrderSignatureMiddleware({
     maker,
     taker: maker, // For limit orders, taker is same as maker
-    positionId,
+    makerPositionId: finalMakerPositionId,
+    takerPositionId: finalTakerPositionId,
     makerAmount: size,
     takerAmount: Math.floor(size * price), // Calculate taker amount from price
     salt: salt || `${Date.now()}`,
@@ -97,13 +106,15 @@ orderRoutes.post("/", async (req: Request, res: Response) => {
       maker,
       marketId,
       conditionId: conditionId || market.conditionId,
-      positionId,
+      makerPositionId: finalMakerPositionId,
+      takerPositionId: finalTakerPositionId,
       side,
       price,
       size,
       salt: salt || `${Date.now()}`,
       expiration: expiration || 999999999, // Very high block number
       signature,
+      publicKey,
     });
 
     res.json({

@@ -17,7 +17,8 @@ export interface Order {
   maker: string; // Principal address
   marketId: string;
   conditionId: string;
-  positionId: string; // YES or NO token ID
+  makerPositionId: string; // Maker's position token ID (hex string, 32 bytes)
+  takerPositionId: string; // Taker's position token ID (hex string, 32 bytes)
   side: OrderSide;
   price: number; // In cents (e.g., 66 = $0.66)
   size: number; // Token amount
@@ -29,6 +30,7 @@ export interface Order {
   createdAt: number;
   updatedAt: number;
   signature?: string;
+  publicKey?: string; // Public key for signature verification
 }
 
 export interface OrderbookLevel {
@@ -49,7 +51,8 @@ export interface Trade {
   tradeId: string;
   marketId: string;
   conditionId: string;
-  positionId: string;
+  makerPositionId: string;
+  takerPositionId: string;
   maker: string;
   taker: string;
   price: number;
