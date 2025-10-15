@@ -1,19 +1,24 @@
-import { verifyMessageSignatureRsv, hashMessage } from "@stacks/encryption";
+import { verifyMessageSignatureRsv } from "@stacks/encryption";
+import { serializeCV, standardPrincipalCV, uintCV, bufferCV } from "@stacks/transactions";
+import { createHash } from "crypto";
 
 /**
  * Compute order hash matching the Clarity contract's hash-order function
  *
- * Contract implementation:
+ * Contract implementation (ctf-exchange.clar:46-78):
  * (sha256 (concat
  *   (concat
  *     (concat
  *       (concat
  *         (concat
  *           (concat
- *             (unwrap-panic (to-consensus-buff? maker))
- *             (unwrap-panic (to-consensus-buff? taker))
+ *             (concat
+ *               (unwrap-panic (to-consensus-buff? maker))
+ *               (unwrap-panic (to-consensus-buff? taker))
+ *             )
+ *             maker-position-id
  *           )
- *           position-id
+ *           taker-position-id
  *         )
  *         (unwrap-panic (to-consensus-buff? maker-amount))
  *       )
@@ -27,27 +32,54 @@ import { verifyMessageSignatureRsv, hashMessage } from "@stacks/encryption";
 export function computeOrderHash(
   maker: string,
   taker: string,
-  positionId: string,
+  makerPositionId: string,
+  takerPositionId: string,
   makerAmount: number,
   takerAmount: number,
   salt: string,
   expiration: number
 ): Buffer {
-  // Create a deterministic order message
-  // This should match the frontend's computeOrderHash function
-  const orderMessage = JSON.stringify({
-    maker,
-    taker,
-    positionId,
-    makerAmount,
-    takerAmount,
-    salt,
-    expiration,
-  });
+  // Validate inputs
+  if (!/^\d+$/.test(salt)) {
+    throw new Error("Salt must be a numeric string");
+  }
 
-  // Hash the message using Stacks' hashMessage function
-  const hash = hashMessage(orderMessage);
-  return Buffer.from(hash);
+  // Serialize each field to Clarity consensus buffers
+  const makerBuff = Buffer.from(serializeCV(standardPrincipalCV(maker)));
+  const takerBuff = Buffer.from(serializeCV(standardPrincipalCV(taker)));
+
+  // Position IDs should be 32-byte hex strings (64 hex chars)
+  const makerPositionIdBuff = Buffer.from(makerPositionId, "hex");
+  const takerPositionIdBuff = Buffer.from(takerPositionId, "hex");
+
+  if (makerPositionIdBuff.length !== 32) {
+    throw new Error(`Maker position ID must be 32 bytes (64 hex chars), got ${makerPositionIdBuff.length} bytes`);
+  }
+  if (takerPositionIdBuff.length !== 32) {
+    throw new Error(`Taker position ID must be 32 bytes (64 hex chars), got ${takerPositionIdBuff.length} bytes`);
+  }
+
+  const makerAmountBuff = Buffer.from(serializeCV(uintCV(makerAmount)));
+  const takerAmountBuff = Buffer.from(serializeCV(uintCV(takerAmount)));
+  const saltBuff = Buffer.from(serializeCV(uintCV(BigInt(salt))));
+  const expirationBuff = Buffer.from(serializeCV(uintCV(expiration)));
+
+  // Concatenate all buffers in the exact order as the contract
+  const concatenated = Buffer.concat([
+    makerBuff,
+    takerBuff,
+    makerPositionIdBuff,
+    takerPositionIdBuff,
+    makerAmountBuff,
+    takerAmountBuff,
+    saltBuff,
+    expirationBuff,
+  ]);
+
+  // Hash with SHA-256 (not Stacks' hashMessage which adds prefixes)
+  const hash = createHash("sha256").update(concatenated).digest();
+
+  return hash;
 }
 
 /**
@@ -92,7 +124,8 @@ export function verifyOrderSignature(
 export async function verifyOrderSignatureMiddleware(orderData: {
   maker: string;
   taker?: string;
-  positionId: string;
+  makerPositionId: string;
+  takerPositionId: string;
   makerAmount: number;
   takerAmount: number;
   salt: string;
@@ -103,7 +136,8 @@ export async function verifyOrderSignatureMiddleware(orderData: {
   const {
     maker,
     taker,
-    positionId,
+    makerPositionId,
+    takerPositionId,
     makerAmount,
     takerAmount,
     salt,
@@ -125,6 +159,14 @@ export async function verifyOrderSignatureMiddleware(orderData: {
     return { valid: false, error: "Maker address is required" };
   }
 
+  if (!makerPositionId) {
+    return { valid: false, error: "Maker position ID is required" };
+  }
+
+  if (!takerPositionId) {
+    return { valid: false, error: "Taker position ID is required" };
+  }
+
   // Use maker as taker if taker is not specified (for limit orders)
   const takerAddress = taker || maker;
 
@@ -133,7 +175,8 @@ export async function verifyOrderSignatureMiddleware(orderData: {
     const orderHash = computeOrderHash(
       maker,
       takerAddress,
-      positionId,
+      makerPositionId,
+      takerPositionId,
       makerAmount,
       takerAmount,
       salt,

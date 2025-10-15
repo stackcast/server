@@ -1,7 +1,4 @@
-import { Buffer } from 'buffer';
-import { createHash } from 'crypto';
-import type { Order, Trade } from '../types/order';
-import { createNetwork, type StacksNetworkName } from '@stacks/network';
+import { createNetwork, type StacksNetworkName } from "@stacks/network";
 import {
   PostConditionMode,
   broadcastTransaction,
@@ -9,7 +6,9 @@ import {
   makeContractCall,
   standardPrincipalCV,
   uintCV,
-} from '@stacks/transactions';
+} from "@stacks/transactions";
+import { Buffer } from "buffer";
+import type { Order, Trade } from "../types/order";
 
 type SettlementConfig = {
   network: StacksNetworkName;
@@ -43,11 +42,14 @@ export class StacksSettlementService {
 
   constructor(config: SettlementConfig) {
     this.network = config.apiUrl
-      ? createNetwork({ network: config.network, client: { baseUrl: config.apiUrl } })
+      ? createNetwork({
+          network: config.network,
+          client: { baseUrl: config.apiUrl },
+        })
       : createNetwork(config.network);
 
     if (config.contractIdentifier && config.operatorPrivateKey) {
-      const [address, name] = config.contractIdentifier.split('.');
+      const [address, name] = config.contractIdentifier.split(".");
 
       if (!address || !name) {
         console.warn(
@@ -63,10 +65,13 @@ export class StacksSettlementService {
       this.enabled = true;
     } else {
       const missing: string[] = [];
-      if (!config.contractIdentifier) missing.push('CTF_EXCHANGE_ADDRESS');
-      if (!config.operatorPrivateKey) missing.push('STACKS_OPERATOR_PRIVATE_KEY');
+      if (!config.contractIdentifier) missing.push("CTF_EXCHANGE_ADDRESS");
+      if (!config.operatorPrivateKey)
+        missing.push("STACKS_OPERATOR_PRIVATE_KEY");
       if (missing.length > 0) {
-        console.warn(`Stacks settlement disabled: missing ${missing.join(', ')}`);
+        console.warn(
+          `Stacks settlement disabled: missing ${missing.join(", ")}`
+        );
       }
       this.enabled = false;
     }
@@ -77,52 +82,90 @@ export class StacksSettlementService {
   }
 
   async submitFill(request: SettlementRequest): Promise<string | undefined> {
-    if (!this.enabled || !this.contractAddress || !this.contractName || !this.operatorKey) {
+    if (
+      !this.enabled ||
+      !this.contractAddress ||
+      !this.contractName ||
+      !this.operatorKey
+    ) {
       return undefined;
     }
 
     const { makerOrder, takerOrder, fillAmount } = request;
 
-    const makerAmount = this.ensureInteger(makerOrder.size, 'maker size');
+    const makerAmount = this.ensureInteger(makerOrder.size, "maker size");
     const takerAmount = this.ensureInteger(
       Math.floor(makerOrder.price * makerOrder.size),
-      'maker taker amount'
+      "maker taker amount"
     );
-    const fill = this.ensureInteger(fillAmount, 'fill amount');
+    const fill = this.ensureInteger(fillAmount, "fill amount");
     const salt = this.parseUint(makerOrder.salt ?? takerOrder.salt);
-    const expiration = this.parseUint(makerOrder.expiration ?? takerOrder.expiration);
+    const expiration = this.parseUint(
+      makerOrder.expiration ?? takerOrder.expiration
+    );
+
+    // Validate signatures are present
+    if (!makerOrder.signature || !takerOrder.signature) {
+      throw new Error(
+        "Both maker and taker signatures are required for settlement"
+      );
+    }
+
+    // Ensure signatures are 65 bytes (130 hex chars)
+    const makerSig = makerOrder.signature.replace(/^0x/, "");
+    const takerSig = takerOrder.signature.replace(/^0x/, "");
+
+    if (makerSig.length !== 130) {
+      throw new Error(
+        `Maker signature must be 65 bytes (130 hex chars), got ${makerSig.length} chars`
+      );
+    }
+    if (takerSig.length !== 130) {
+      throw new Error(
+        `Taker signature must be 65 bytes (130 hex chars), got ${takerSig.length} chars`
+      );
+    }
 
     const functionArgs = [
+      // Maker order details
       standardPrincipalCV(makerOrder.maker),
-      bufferCV(this.positionIdToBuffer(makerOrder.positionId)),
+      bufferCV(this.positionIdToBuffer(makerOrder.makerPositionId)),
       uintCV(makerAmount),
+      bufferCV(Buffer.from(makerSig, "hex")),
+      // Taker order details
       standardPrincipalCV(takerOrder.maker),
-      bufferCV(
-        this.positionIdToBuffer(this.resolveTakerPositionId(makerOrder.positionId, takerOrder.positionId))
-      ),
+      bufferCV(this.positionIdToBuffer(takerOrder.takerPositionId)),
       uintCV(takerAmount),
+      bufferCV(Buffer.from(takerSig, "hex")),
+      // Order metadata
       uintCV(salt),
       uintCV(expiration),
+      // Fill amount
       uintCV(fill),
     ];
 
     const tx = await makeContractCall({
       contractAddress: this.contractAddress,
       contractName: this.contractName,
-      functionName: 'fill-order',
+      functionName: "fill-order",
       functionArgs,
       senderKey: this.operatorKey,
       network: this.network,
       postConditionMode: PostConditionMode.Deny,
     });
 
-    const broadcastResult = await broadcastTransaction({ transaction: tx, network: this.network });
+    const broadcastResult = await broadcastTransaction({
+      transaction: tx,
+      network: this.network,
+    });
 
-    if ('txid' in broadcastResult && !('error' in broadcastResult)) {
+    if ("txid" in broadcastResult && !("error" in broadcastResult)) {
       return broadcastResult.txid;
     }
 
-    throw new Error(`Settlement broadcast rejected: ${JSON.stringify(broadcastResult)}`);
+    throw new Error(
+      `Settlement broadcast rejected: ${JSON.stringify(broadcastResult)}`
+    );
   }
 
   private ensureInteger(value: number, context: string): bigint {
@@ -131,7 +174,9 @@ export class StacksSettlementService {
     }
 
     if (!Number.isInteger(value)) {
-      throw new Error(`${context} must be an integer for settlement (received ${value})`);
+      throw new Error(
+        `${context} must be an integer for settlement (received ${value})`
+      );
     }
 
     return BigInt(value);
@@ -142,7 +187,7 @@ export class StacksSettlementService {
       return 0n;
     }
 
-    if (typeof value === 'number') {
+    if (typeof value === "number") {
       if (!Number.isFinite(value) || value < 0) {
         throw new Error(`Invalid numeric value ${value}`);
       }
@@ -152,7 +197,7 @@ export class StacksSettlementService {
       return BigInt(value);
     }
 
-    if (typeof value === 'string') {
+    if (typeof value === "string") {
       if (value.trim().length === 0) {
         return 0n;
       }
@@ -162,31 +207,17 @@ export class StacksSettlementService {
       return BigInt(value);
     }
 
-    throw new Error('Unsupported value type for parseUint');
+    throw new Error("Unsupported value type for parseUint");
   }
 
   private positionIdToBuffer(positionId: string): Uint8Array {
+    // Position IDs should always be 64 hex chars (32 bytes)
     if (/^[0-9a-fA-F]{64}$/.test(positionId)) {
-      return Buffer.from(positionId, 'hex');
+      return Buffer.from(positionId, "hex");
     }
 
-    // Fallback: derive a stable 32-byte identifier from the plain string.
-    return createHash('sha256').update(positionId).digest();
-  }
-
-  private resolveTakerPositionId(makerPositionId: string, takerPositionId?: string): string {
-    if (takerPositionId && takerPositionId !== makerPositionId) {
-      return takerPositionId;
-    }
-
-    if (makerPositionId.endsWith('_yes')) {
-      return makerPositionId.replace(/_yes$/, '_no');
-    }
-
-    if (makerPositionId.endsWith('_no')) {
-      return makerPositionId.replace(/_no$/, '_yes');
-    }
-
-    return takerPositionId || makerPositionId;
+    throw new Error(
+      `Position ID must be a 64-character hex string (32 bytes), got: ${positionId}`
+    );
   }
 }

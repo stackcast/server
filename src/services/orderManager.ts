@@ -127,11 +127,11 @@ export class OrderManager {
   // Generate orderbook for a market
   getOrderbook(
     marketId: string,
-    positionId: string
+    makerPositionId: string
   ): { bids: OrderbookLevel[]; asks: OrderbookLevel[] } {
     const orders = this.getMarketOrders(marketId).filter(
       (o) =>
-        o.positionId === positionId &&
+        o.makerPositionId === makerPositionId &&
         (o.status === OrderStatus.OPEN ||
           o.status === OrderStatus.PARTIALLY_FILLED)
     );

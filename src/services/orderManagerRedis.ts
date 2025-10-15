@@ -65,7 +65,8 @@ export class OrderManagerRedis {
     pipeline.sadd(`user:${order.maker}:orders`, orderId);
 
     // Add to orderbook sorted set (score = price for efficient range queries)
-    const bookKey = `orderbook:${order.marketId}:${order.positionId}:${order.side.toLowerCase()}`;
+    // Use makerPositionId for orderbook organization
+    const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
     if (order.side === OrderSide.BUY) {
       // Bids: higher price = higher score (reverse order later)
       pipeline.zadd(bookKey, order.price, orderId);
@@ -159,7 +160,7 @@ export class OrderManagerRedis {
       const newRemainingSize = order.remainingSize - fillSize;
       const newStatus =
         newRemainingSize <= 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
-      const bookKey = `orderbook:${order.marketId}:${order.positionId}:${order.side.toLowerCase()}`;
+      const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
 
       const transaction = redis.multi();
 
@@ -212,7 +213,7 @@ export class OrderManagerRedis {
     });
 
     // Remove from orderbook
-    const bookKey = `orderbook:${order.marketId}:${order.positionId}:${order.side.toLowerCase()}`;
+    const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
     pipeline.zrem(bookKey, orderId);
 
     await pipeline.exec();
@@ -242,7 +243,7 @@ export class OrderManagerRedis {
     });
 
     // Remove from orderbook
-    const bookKey = `orderbook:${order.marketId}:${order.positionId}:${order.side.toLowerCase()}`;
+    const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
     pipeline.zrem(bookKey, orderId);
 
     await pipeline.exec();
@@ -255,10 +256,10 @@ export class OrderManagerRedis {
 
   async getOrderbook(
     marketId: string,
-    positionId: string
+    makerPositionId: string
   ): Promise<{ bids: OrderbookLevel[]; asks: OrderbookLevel[] }> {
     // Check cache first (10 second TTL)
-    const cacheKey = `orderbook:${marketId}:${positionId}:cache`;
+    const cacheKey = `orderbook:${marketId}:${makerPositionId}:cache`;
     const cached = await redis.get(cacheKey);
 
     if (cached) {
@@ -266,8 +267,8 @@ export class OrderManagerRedis {
     }
 
     // Build from sorted sets
-    const bidsKey = `orderbook:${marketId}:${positionId}:buy`;
-    const asksKey = `orderbook:${marketId}:${positionId}:sell`;
+    const bidsKey = `orderbook:${marketId}:${makerPositionId}:buy`;
+    const asksKey = `orderbook:${marketId}:${makerPositionId}:sell`;
 
     // Get all orders with scores (prices)
     const [bidsRaw, asksRaw] = await Promise.all([
@@ -409,7 +410,8 @@ export class OrderManagerRedis {
       maker: data.maker,
       marketId: data.marketId,
       conditionId: data.conditionId,
-      positionId: data.positionId,
+      makerPositionId: data.makerPositionId,
+      takerPositionId: data.takerPositionId,
       side: data.side as OrderSide,
       price: parseFloat(data.price),
       size: parseFloat(data.size),
@@ -421,6 +423,7 @@ export class OrderManagerRedis {
       createdAt: parseInt(data.createdAt),
       updatedAt: parseInt(data.updatedAt),
       signature: data.signature,
+      publicKey: data.publicKey,
     };
   }
 }
