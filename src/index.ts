@@ -9,7 +9,6 @@ import { MatchingEngine } from './services/matchingEngine';
 import { OrderManagerRedis } from './services/orderManagerRedis';
 import { StacksMonitor } from './services/stacksMonitor';
 import { StacksSettlementService } from './services/stacksSettlement';
-import './types/express.d.ts'; // Extend Express types
 
 dotenv.config();
 

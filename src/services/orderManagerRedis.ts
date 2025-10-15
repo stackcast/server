@@ -130,55 +130,71 @@ export class OrderManagerRedis {
 
     const orderKey = `order:${orderId}`;
 
-    // Upstash Redis doesn't support WATCH/MULTI, so we do optimistic update
-    const orderData = await redis.hgetall(orderKey);
-    if (!orderData || Object.keys(orderData).length === 0) {
-      return false;
+    // Per-order lock to serialize fills (Upstash doesn't support WATCH for optimistic locking)
+    const lockKey = `lock:order:${orderId}`;
+    const lockId = randomBytes(8).toString("hex");
+    const locked = await redis.set(lockKey, lockId, { nx: true, px: 5000 });
+    if (locked !== "OK") {
+      return false; // busy; caller may retry with backoff
     }
 
-    const order = this.parseOrder(orderData as Record<string, string>);
+    try {
+      const orderData = await redis.hgetall(orderKey);
+      if (!orderData || Object.keys(orderData).length === 0) {
+        return false;
+      }
 
-    if (
-      order.status === OrderStatus.FILLED ||
-      order.status === OrderStatus.CANCELLED ||
-      order.status === OrderStatus.EXPIRED
-    ) {
-      return false;
+      const order = this.parseOrder(orderData as Record<string, string>);
+
+      if (
+        order.status === OrderStatus.FILLED ||
+        order.status === OrderStatus.CANCELLED ||
+        order.status === OrderStatus.EXPIRED
+      ) {
+        return false;
+      }
+
+      if (fillSize > order.remainingSize) {
+        return false;
+      }
+
+      const newFilledSize = order.filledSize + fillSize;
+      const newRemainingSize = order.remainingSize - fillSize;
+      const newStatus =
+        newRemainingSize <= 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
+      const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
+
+      const pipeline = redis.pipeline();
+
+      pipeline.hset(orderKey, {
+        filledSize: newFilledSize.toString(),
+        remainingSize: newRemainingSize.toString(),
+        status: newStatus.toString(),
+        updatedAt: Date.now().toString(),
+      });
+
+      if (newRemainingSize <= 0) {
+        pipeline.zrem(bookKey, orderId);
+      }
+
+      // Invalidate cached orderbook
+      const cacheKey = `orderbook:${order.marketId}:${order.makerPositionId}:cache`;
+      pipeline.del(cacheKey);
+
+      await pipeline.exec();
+
+      if (newRemainingSize <= 0) {
+        console.log(`✅ Order filled: ${orderId}`);
+      } else {
+        console.log(`⚡ Order partially filled: ${orderId} (${newFilledSize}/${order.size})`);
+      }
+      return true;
+    } finally {
+      const current = await redis.get(lockKey) as string | null;
+      if (current === lockId) {
+        await redis.del(lockKey);
+      }
     }
-
-    if (fillSize > order.remainingSize) {
-      return false;
-    }
-
-    const newFilledSize = order.filledSize + fillSize;
-    const newRemainingSize = order.remainingSize - fillSize;
-    const newStatus =
-      newRemainingSize <= 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
-    const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
-
-    const pipeline = redis.pipeline();
-
-    pipeline.hset(orderKey, {
-      filledSize: newFilledSize.toString(),
-      remainingSize: newRemainingSize.toString(),
-      status: newStatus.toString(),
-      updatedAt: Date.now().toString(),
-    });
-
-    if (newRemainingSize <= 0) {
-      pipeline.zrem(bookKey, orderId);
-    }
-
-    await pipeline.exec();
-
-    if (newRemainingSize <= 0) {
-      console.log(`✅ Order filled: ${orderId}`);
-    } else {
-      console.log(
-        `⚡ Order partially filled: ${orderId} (${newFilledSize}/${order.size})`
-      );
-    }
-    return true;
   }
 
   async cancelOrder(orderId: string): Promise<boolean> {
@@ -271,7 +287,7 @@ export class OrderManagerRedis {
     const result = { bids, asks };
 
     // Cache for 10 seconds
-    await redis.setex(cacheKey, 10, JSON.stringify(result));
+    await redis.set(cacheKey, JSON.stringify(result), { ex: 10 });
 
     return result;
   }
