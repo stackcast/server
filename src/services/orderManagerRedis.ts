@@ -69,10 +69,10 @@ export class OrderManagerRedis {
     const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
     if (order.side === OrderSide.BUY) {
       // Bids: higher price = higher score (reverse order later)
-      pipeline.zadd(bookKey, order.price, orderId);
+      pipeline.zadd(bookKey, { score: order.price, member: orderId });
     } else {
       // Asks: lower price = higher score
-      pipeline.zadd(bookKey, order.price, orderId);
+      pipeline.zadd(bookKey, { score: order.price, member: orderId });
     }
 
     // Execute all commands atomically
@@ -88,11 +88,11 @@ export class OrderManagerRedis {
   async getOrder(orderId: string): Promise<Order | null> {
     const orderData = await redis.hgetall(`order:${orderId}`);
 
-    if (Object.keys(orderData).length === 0) {
+    if (!orderData || Object.keys(orderData).length === 0) {
       return null;
     }
 
-    return this.parseOrder(orderData);
+    return this.parseOrder(orderData as Record<string, string>);
   }
 
   async getMarketOrders(marketId: string): Promise<Order[]> {
@@ -129,68 +129,56 @@ export class OrderManagerRedis {
     }
 
     const orderKey = `order:${orderId}`;
-    const maxAttempts = 5;
 
-    for (let attempt = 0; attempt < maxAttempts; attempt++) {
-      await redis.watch(orderKey);
-
-      const orderData = await redis.hgetall(orderKey);
-      if (Object.keys(orderData).length === 0) {
-        await redis.unwatch();
-        return false;
-      }
-
-      const order = this.parseOrder(orderData);
-
-      if (
-        order.status === OrderStatus.FILLED ||
-        order.status === OrderStatus.CANCELLED ||
-        order.status === OrderStatus.EXPIRED
-      ) {
-        await redis.unwatch();
-        return false;
-      }
-
-      if (fillSize > order.remainingSize) {
-        await redis.unwatch();
-        return false;
-      }
-
-      const newFilledSize = order.filledSize + fillSize;
-      const newRemainingSize = order.remainingSize - fillSize;
-      const newStatus =
-        newRemainingSize <= 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
-      const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
-
-      const transaction = redis.multi();
-
-      transaction.hset(orderKey, {
-        filledSize: newFilledSize,
-        remainingSize: newRemainingSize,
-        status: newStatus.toString(),
-        updatedAt: Date.now(),
-      });
-
-      if (newRemainingSize <= 0) {
-        transaction.zrem(bookKey, orderId);
-      }
-
-      const execResult = await transaction.exec();
-      if (execResult !== null) {
-        if (newRemainingSize <= 0) {
-          console.log(`✅ Order filled: ${orderId}`);
-        } else {
-          console.log(
-            `⚡ Order partially filled: ${orderId} (${newFilledSize}/${order.size})`
-          );
-        }
-        return true;
-      }
+    // Upstash Redis doesn't support WATCH/MULTI, so we do optimistic update
+    const orderData = await redis.hgetall(orderKey);
+    if (!orderData || Object.keys(orderData).length === 0) {
+      return false;
     }
 
-    await redis.unwatch();
-    console.warn(`⚠️ Failed to fill order due to concurrent updates: ${orderId}`);
-    return false;
+    const order = this.parseOrder(orderData as Record<string, string>);
+
+    if (
+      order.status === OrderStatus.FILLED ||
+      order.status === OrderStatus.CANCELLED ||
+      order.status === OrderStatus.EXPIRED
+    ) {
+      return false;
+    }
+
+    if (fillSize > order.remainingSize) {
+      return false;
+    }
+
+    const newFilledSize = order.filledSize + fillSize;
+    const newRemainingSize = order.remainingSize - fillSize;
+    const newStatus =
+      newRemainingSize <= 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
+    const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
+
+    const pipeline = redis.pipeline();
+
+    pipeline.hset(orderKey, {
+      filledSize: newFilledSize.toString(),
+      remainingSize: newRemainingSize.toString(),
+      status: newStatus.toString(),
+      updatedAt: Date.now().toString(),
+    });
+
+    if (newRemainingSize <= 0) {
+      pipeline.zrem(bookKey, orderId);
+    }
+
+    await pipeline.exec();
+
+    if (newRemainingSize <= 0) {
+      console.log(`✅ Order filled: ${orderId}`);
+    } else {
+      console.log(
+        `⚡ Order partially filled: ${orderId} (${newFilledSize}/${order.size})`
+      );
+    }
+    return true;
   }
 
   async cancelOrder(orderId: string): Promise<boolean> {
@@ -263,7 +251,7 @@ export class OrderManagerRedis {
     const cached = await redis.get(cacheKey);
 
     if (cached) {
-      return JSON.parse(cached);
+      return JSON.parse(cached as string);
     }
 
     // Build from sorted sets
@@ -272,13 +260,13 @@ export class OrderManagerRedis {
 
     // Get all orders with scores (prices)
     const [bidsRaw, asksRaw] = await Promise.all([
-      redis.zrevrange(bidsKey, 0, -1, "WITHSCORES"), // Reverse for bids (high to low)
-      redis.zrange(asksKey, 0, -1, "WITHSCORES"),    // Normal for asks (low to high)
+      redis.zrange(bidsKey, 0, -1, { rev: true, withScores: true }), // Reverse for bids (high to low)
+      redis.zrange(asksKey, 0, -1, { withScores: true }),    // Normal for asks (low to high)
     ]);
 
     // Parse and aggregate by price level
-    const bids = await this.aggregateOrderbook(bidsRaw, true);
-    const asks = await this.aggregateOrderbook(asksRaw, false);
+    const bids = await this.aggregateOrderbook(bidsRaw as Array<{ score: number; member: string }>, true);
+    const asks = await this.aggregateOrderbook(asksRaw as Array<{ score: number; member: string }>, false);
 
     const result = { bids, asks };
 
@@ -289,15 +277,15 @@ export class OrderManagerRedis {
   }
 
   private async aggregateOrderbook(
-    rawData: string[],
+    rawData: Array<{ score: number; member: string }>,
     isBid: boolean
   ): Promise<OrderbookLevel[]> {
     const levels = new Map<number, { size: number; count: number }>();
 
-    // rawData format: [orderId, price, orderId, price, ...]
-    for (let i = 0; i < rawData.length; i += 2) {
-      const orderId = rawData[i];
-      const price = parseFloat(rawData[i + 1]);
+    // rawData format: array of {score: price, member: orderId}
+    for (const item of rawData) {
+      const orderId = item.member;
+      const price = item.score;
 
       const order = await this.getOrder(orderId);
       if (!order) continue;
@@ -350,23 +338,25 @@ export class OrderManagerRedis {
   async getMarket(marketId: string): Promise<Market | null> {
     const marketData = await redis.hgetall(`market:${marketId}`);
 
-    if (Object.keys(marketData).length === 0) {
+    if (!marketData || Object.keys(marketData).length === 0) {
       return null;
     }
 
+    const data = marketData as Record<string, string>;
+
     return {
-      marketId: marketData.marketId,
-      conditionId: marketData.conditionId,
-      question: marketData.question,
-      creator: marketData.creator,
-      yesPositionId: marketData.yesPositionId,
-      noPositionId: marketData.noPositionId,
-      yesPrice: parseFloat(marketData.yesPrice),
-      noPrice: parseFloat(marketData.noPrice),
-      volume24h: parseFloat(marketData.volume24h),
-      createdAt: parseInt(marketData.createdAt),
-      resolved: marketData.resolved === "true",
-      outcome: marketData.outcome ? parseInt(marketData.outcome) : undefined,
+      marketId: data.marketId,
+      conditionId: data.conditionId,
+      question: data.question,
+      creator: data.creator,
+      yesPositionId: data.yesPositionId,
+      noPositionId: data.noPositionId,
+      yesPrice: parseFloat(data.yesPrice),
+      noPrice: parseFloat(data.noPrice),
+      volume24h: parseFloat(data.volume24h),
+      createdAt: parseInt(data.createdAt),
+      resolved: data.resolved === "true",
+      outcome: data.outcome ? parseInt(data.outcome) : undefined,
     };
   }
 
