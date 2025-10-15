@@ -4,11 +4,11 @@ import dotenv from 'dotenv';
 import { marketRoutes } from './routes/markets';
 import { orderRoutes } from './routes/orders';
 import { orderbookRoutes } from './routes/orderbook';
+import { oracleRoutes } from './routes/oracle';
 import { MatchingEngine } from './services/matchingEngine';
 import { OrderManagerRedis } from './services/orderManagerRedis';
 import { StacksMonitor } from './services/stacksMonitor';
 import { StacksSettlementService } from './services/stacksSettlement';
-import './types/express'; // Extend Express types
 
 dotenv.config();
 
@@ -47,6 +47,7 @@ app.use((req, _res, next) => {
 app.use('/api/markets', marketRoutes);
 app.use('/api/orders', orderRoutes);
 app.use('/api/orderbook', orderbookRoutes);
+app.use('/api/oracle', oracleRoutes);
 
 // Health check
 app.get('/health', async (_req, res) => {
