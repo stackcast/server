@@ -1,4 +1,4 @@
-import { Router, Request, Response } from "express";
+import { Request, Response, Router } from "express";
 import { Order, OrderSide } from "../types/order";
 import { verifyOrderSignatureMiddleware } from "../utils/signatureVerification";
 
@@ -65,33 +65,31 @@ orderRoutes.post("/", async (req: Request, res: Response) => {
     });
   }
 
-  // Verify signature if provided (optional for now, will be required in production)
-  if (signature) {
-    if (!publicKey) {
-      return res.status(400).json({
-        success: false,
-        error: "publicKey is required when signature is provided",
-      });
-    }
-
-    const signatureVerification = await verifyOrderSignatureMiddleware({
-      maker,
-      taker: maker, // For limit orders, taker is same as maker
-      positionId,
-      makerAmount: size,
-      takerAmount: Math.floor(size * price), // Calculate taker amount from price
-      salt: salt || `${Date.now()}`,
-      expiration: expiration || 999999999,
-      signature,
-      publicKey,
+  // Verify signature (REQUIRED for production security)
+  if (!signature || !publicKey) {
+    return res.status(400).json({
+      success: false,
+      error: "signature and publicKey are required fields",
     });
+  }
 
-    if (!signatureVerification.valid) {
-      return res.status(401).json({
-        success: false,
-        error: signatureVerification.error || "Invalid signature",
-      });
-    }
+  const signatureVerification = await verifyOrderSignatureMiddleware({
+    maker,
+    taker: maker, // For limit orders, taker is same as maker
+    positionId,
+    makerAmount: size,
+    takerAmount: Math.floor(size * price), // Calculate taker amount from price
+    salt: salt || `${Date.now()}`,
+    expiration: expiration || 999999999,
+    signature,
+    publicKey,
+  });
+
+  if (!signatureVerification.valid) {
+    return res.status(401).json({
+      success: false,
+      error: signatureVerification.error || "Invalid signature",
+    });
   }
 
   try {
