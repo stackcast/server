@@ -101,10 +101,17 @@ smartOrderRoutes.post("/preview", async (req: Request, res: Response) => {
         });
       }
       numericPrice = parseFloat(price);
-      if (isNaN(numericPrice) || numericPrice < 0 || numericPrice > 100) {
+      if (isNaN(numericPrice) || numericPrice < 0) {
         return res.status(400).json({
           success: false,
-          error: "Price must be between 0 and 100 cents",
+          error: "Price must be a positive number in micro-sats",
+        });
+      }
+      // Ensure price is an integer (micro-sats)
+      if (!Number.isInteger(numericPrice)) {
+        return res.status(400).json({
+          success: false,
+          error: "Price must be an integer (micro-sats)",
         });
       }
     }
@@ -260,16 +267,19 @@ smartOrderRoutes.post("/", async (req: Request, res: Response) => {
     let takerPositionId: string;
 
     if (side === OrderSide.BUY) {
+      // BUY: maker gives opposite token, gets desired token
       makerPositionId =
-        outcome === "yes" ? market.yesPositionId : market.noPositionId;
-      takerPositionId =
         outcome === "yes" ? market.noPositionId : market.yesPositionId;
+      takerPositionId =
+        outcome === "yes" ? market.yesPositionId : market.noPositionId;
     } else {
+      // SELL: maker gives desired token, gets opposite token
       makerPositionId =
-        outcome === "yes" ? market.noPositionId : market.yesPositionId;
-      takerPositionId =
         outcome === "yes" ? market.yesPositionId : market.noPositionId;
+      takerPositionId =
+        outcome === "yes" ? market.noPositionId : market.yesPositionId;
     }
+
 
     // MARKET ORDER: Multi-level execution
     if (orderType === OrderType.MARKET) {
@@ -373,10 +383,17 @@ smartOrderRoutes.post("/", async (req: Request, res: Response) => {
 
     // LIMIT ORDER: Single order at specified price
     const numericPrice = parseFloat(price);
-    if (isNaN(numericPrice) || numericPrice < 0 || numericPrice > 100) {
+    if (isNaN(numericPrice) || numericPrice < 0) {
       return res.status(400).json({
         success: false,
-        error: "Price must be between 0 and 100 cents for LIMIT orders",
+        error: "Price must be a positive number in micro-sats for LIMIT orders",
+      });
+    }
+    // Ensure price is an integer (micro-sats)
+    if (!Number.isInteger(numericPrice)) {
+      return res.status(400).json({
+        success: false,
+        error: "Price must be an integer (micro-sats) for LIMIT orders",
       });
     }
 
@@ -401,6 +418,7 @@ smartOrderRoutes.post("/", async (req: Request, res: Response) => {
     // Verify signature
     const makerAmount = numericSize;
     const takerAmount = numericSize * numericPrice;
+
 
     const verificationResult = await verifyOrderSignatureMiddleware({
       maker,
