@@ -1,7 +1,7 @@
 import express, { type Request, type Response } from "express";
+import { ExecutionPlan, SmartRouter } from "../services/smartRouter";
 import { OrderSide, OrderType } from "../types/order";
 import { verifyOrderSignatureMiddleware } from "../utils/signatureVerification";
-import { SmartRouter, ExecutionPlan } from "../services/smartRouter";
 
 export const smartOrderRoutes = express.Router();
 
@@ -46,13 +46,15 @@ smartOrderRoutes.post("/preview", async (req: Request, res: Response) => {
     const orderManager = req.orderManager;
     const smartRouter = new SmartRouter(orderManager);
 
-    const { marketId, outcome, side, orderType, size, price, maxSlippage } = req.body;
+    const { marketId, outcome, side, orderType, size, price, maxSlippage } =
+      req.body;
 
     // Validate required fields
     if (!marketId || !outcome || !side || !orderType || !size) {
       return res.status(400).json({
         success: false,
-        error: "Missing required fields: marketId, outcome, side, orderType, size",
+        error:
+          "Missing required fields: marketId, outcome, side, orderType, size",
       });
     }
 
@@ -206,7 +208,8 @@ smartOrderRoutes.post("/", async (req: Request, res: Response) => {
     if (!maker || !marketId || !side || !outcome || !orderType || !size) {
       return res.status(400).json({
         success: false,
-        error: "Missing required fields: maker, marketId, side, outcome, orderType, size",
+        error:
+          "Missing required fields: maker, marketId, side, outcome, orderType, size",
       });
     }
 
@@ -257,11 +260,15 @@ smartOrderRoutes.post("/", async (req: Request, res: Response) => {
     let takerPositionId: string;
 
     if (side === OrderSide.BUY) {
-      makerPositionId = outcome === "yes" ? market.yesPositionId : market.noPositionId;
-      takerPositionId = outcome === "yes" ? market.noPositionId : market.yesPositionId;
+      makerPositionId =
+        outcome === "yes" ? market.yesPositionId : market.noPositionId;
+      takerPositionId =
+        outcome === "yes" ? market.noPositionId : market.yesPositionId;
     } else {
-      makerPositionId = outcome === "yes" ? market.noPositionId : market.yesPositionId;
-      takerPositionId = outcome === "yes" ? market.yesPositionId : market.noPositionId;
+      makerPositionId =
+        outcome === "yes" ? market.noPositionId : market.yesPositionId;
+      takerPositionId =
+        outcome === "yes" ? market.yesPositionId : market.noPositionId;
     }
 
     // MARKET ORDER: Multi-level execution
@@ -356,7 +363,11 @@ smartOrderRoutes.post("/", async (req: Request, res: Response) => {
           slippage: plan.slippage,
           levels: plan.levels.length,
         },
-        message: `Market order placed: ${orders.length} orders totaling ${numericSize} ${outcome.toUpperCase()} @ avg ${plan.averagePrice.toFixed(2)}¢`,
+        message: `Market order placed: ${
+          orders.length
+        } orders totaling ${numericSize} ${outcome.toUpperCase()} @ avg ${plan.averagePrice.toFixed(
+          2
+        )}¢`,
       });
     }
 
@@ -480,9 +491,11 @@ smartOrderRoutes.post("/requirements", async (req: Request, res: Response) => {
     let requiredPositionId: string;
 
     if (side === OrderSide.BUY) {
-      requiredPositionId = outcome === "yes" ? market.noPositionId : market.yesPositionId;
+      requiredPositionId =
+        outcome === "yes" ? market.noPositionId : market.yesPositionId;
     } else {
-      requiredPositionId = outcome === "yes" ? market.yesPositionId : market.noPositionId;
+      requiredPositionId =
+        outcome === "yes" ? market.yesPositionId : market.noPositionId;
     }
 
     return res.json({
@@ -492,7 +505,10 @@ smartOrderRoutes.post("/requirements", async (req: Request, res: Response) => {
         conditionId: market.conditionId,
         requiredPositionId,
         requiredAmount: parseFloat(size),
-        action: side === OrderSide.BUY ? `Buying ${outcome.toUpperCase()}` : `Selling ${outcome.toUpperCase()}`,
+        action:
+          side === OrderSide.BUY
+            ? `Buying ${outcome.toUpperCase()}`
+            : `Selling ${outcome.toUpperCase()}`,
         hint:
           side === OrderSide.BUY
             ? `To buy ${outcome.toUpperCase()}, you can either: 1) Split collateral to get both YES+NO tokens, 2) Buy from someone selling ${outcome.toUpperCase()}`

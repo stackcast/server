@@ -1,0 +1,49 @@
+services:
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    command: redis-server --appendonly yes --maxmemory 256mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - stackcast-network
+
+  server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: production
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - REDIS_URL=redis://redis:6379
+      - STACKS_NETWORK=${STACKS_NETWORK:-mainnet}
+      - STACKS_API_URL=${STACKS_API_URL}
+      - STACKS_OPERATOR_PRIVATE_KEY=${STACKS_OPERATOR_PRIVATE_KEY}
+      - CONDITIONAL_TOKENS_ADDRESS=${CONDITIONAL_TOKENS_ADDRESS}
+      - CTF_EXCHANGE_ADDRESS=${CTF_EXCHANGE_ADDRESS}
+      - ORACLE_ADDRESS=${ORACLE_ADDRESS}
+      - ORACLE_ADAPTER_ADDRESS=${ORACLE_ADAPTER_ADDRESS}
+      - ADMIN_API_KEY=${ADMIN_API_KEY}
+    depends_on:
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    networks:
+      - stackcast-network
+
+volumes:
+  redis-data:
+
+networks:
+  stackcast-network:
+    driver: bridge

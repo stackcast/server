@@ -78,36 +78,32 @@ export class OrderManagerRedis {
       updatedAt: now,
     };
 
-    // Redis pipeline = all commands execute atomically (all succeed or all fail)
-    const pipeline = redis.pipeline();
+    // Redis multi = all commands execute atomically (all succeed or all fail)
+    const multi = redis.multi();
+
+    // Convert order to flat object for HSET
+    const orderHash: Record<string, string> = {};
+    for (const [key, value] of Object.entries(fullOrder)) {
+      orderHash[key] = String(value);
+    }
 
     // 1. Store complete order as hash (key-value pairs)
-    pipeline.hset(`order:${orderId}`, {
-      ...fullOrder,
-      // Redis stores everything as strings, convert enums
-      side: fullOrder.side.toString(),
-      status: fullOrder.status.toString(),
-    });
+    multi.hSet(`order:${orderId}`, orderHash);
 
     // 2. Index by market (enables getMarketOrders query)
-    pipeline.sadd(`market:${order.marketId}:orders`, orderId);
+    multi.sAdd(`market:${order.marketId}:orders`, orderId);
 
     // 3. Index by user (enables getUserOrders query)
-    pipeline.sadd(`user:${order.maker}:orders`, orderId);
+    multi.sAdd(`user:${order.maker}:orders`, orderId);
 
     // 4. Add to price-sorted orderbook (enables matching engine to find best prices)
     // Sorted set score = price, enables O(log N) range queries
     const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
-    if (order.side === OrderSide.BUY) {
-      // Bids: stored with score=price (we'll reverse when reading for high→low)
-      pipeline.zadd(bookKey, { score: order.price, member: orderId });
-    } else {
-      // Asks: stored with score=price (read as-is for low→high)
-      pipeline.zadd(bookKey, { score: order.price, member: orderId });
-    }
+    // Both buy and sell stored with score=price
+    multi.zAdd(bookKey, { score: order.price, value: orderId });
 
     // Execute all 4 commands atomically
-    await pipeline.exec();
+    await multi.exec();
 
     console.log(
       `📝 New order: ${orderId} - ${order.side} ${order.size} @ ${order.price}`
@@ -117,7 +113,7 @@ export class OrderManagerRedis {
   }
 
   async getOrder(orderId: string): Promise<Order | null> {
-    const orderData = await redis.hgetall(`order:${orderId}`);
+    const orderData = await redis.hGetAll(`order:${orderId}`);
 
     if (!orderData || Object.keys(orderData).length === 0) {
       return null;
@@ -127,7 +123,7 @@ export class OrderManagerRedis {
   }
 
   async getMarketOrders(marketId: string): Promise<Order[]> {
-    const orderIds = await redis.smembers(`market:${marketId}:orders`);
+    const orderIds = await redis.sMembers(`market:${marketId}:orders`);
 
     if (orderIds.length === 0) {
       return [];
@@ -141,7 +137,7 @@ export class OrderManagerRedis {
   }
 
   async getUserOrders(userAddress: string): Promise<Order[]> {
-    const orderIds = await redis.smembers(`user:${userAddress}:orders`);
+    const orderIds = await redis.sMembers(`user:${userAddress}:orders`);
 
     if (orderIds.length === 0) {
       return [];
@@ -183,13 +179,13 @@ export class OrderManagerRedis {
     // Distributed lock prevents concurrent fills (critical for matching engine)
     const lockKey = `lock:order:${orderId}`;
     const lockId = randomBytes(8).toString("hex"); // Unique lock ID to prevent accidental unlock
-    const locked = await redis.set(lockKey, lockId, { nx: true, px: 5000 }); // 5s timeout
+    const locked = await redis.set(lockKey, lockId, { NX: true, PX: 5000 }); // 5s timeout
     if (locked !== "OK") {
       return false; // Another process is filling this order, retry later
     }
 
     try {
-      const orderData = await redis.hgetall(orderKey);
+      const orderData = await redis.hGetAll(orderKey);
       if (!orderData || Object.keys(orderData).length === 0) {
         return false;
       }
@@ -214,9 +210,9 @@ export class OrderManagerRedis {
         newRemainingSize <= 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
       const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
 
-      const pipeline = redis.pipeline();
+      const multi = redis.multi();
 
-      pipeline.hset(orderKey, {
+      multi.hSet(orderKey, {
         filledSize: newFilledSize.toString(),
         remainingSize: newRemainingSize.toString(),
         status: newStatus.toString(),
@@ -224,14 +220,14 @@ export class OrderManagerRedis {
       });
 
       if (newRemainingSize <= 0) {
-        pipeline.zrem(bookKey, orderId);
+        multi.zRem(bookKey, orderId);
       }
 
       // Invalidate cached orderbook
       const cacheKey = `orderbook:${order.marketId}:${order.makerPositionId}:cache`;
-      pipeline.del(cacheKey);
+      multi.del(cacheKey);
 
-      await pipeline.exec();
+      await multi.exec();
 
       if (newRemainingSize <= 0) {
         console.log(`✅ Order filled: ${orderId}`);
@@ -240,7 +236,7 @@ export class OrderManagerRedis {
       }
       return true;
     } finally {
-      const current = await redis.get(lockKey) as string | null;
+      const current = await redis.get(lockKey);
       if (current === lockId) {
         await redis.del(lockKey);
       }
@@ -258,19 +254,19 @@ export class OrderManagerRedis {
       return false;
     }
 
-    const pipeline = redis.pipeline();
+    const multi = redis.multi();
 
     // Update status
-    pipeline.hset(`order:${orderId}`, {
+    multi.hSet(`order:${orderId}`, {
       status: OrderStatus.CANCELLED.toString(),
-      updatedAt: Date.now(),
+      updatedAt: Date.now().toString(),
     });
 
     // Remove from orderbook
     const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
-    pipeline.zrem(bookKey, orderId);
+    multi.zRem(bookKey, orderId);
 
-    await pipeline.exec();
+    await multi.exec();
 
     console.log(`❌ Order cancelled: ${orderId}`);
     return true;
@@ -288,19 +284,19 @@ export class OrderManagerRedis {
       return false;
     }
 
-    const pipeline = redis.pipeline();
+    const multi = redis.multi();
 
     // Update status
-    pipeline.hset(`order:${orderId}`, {
+    multi.hSet(`order:${orderId}`, {
       status: OrderStatus.EXPIRED.toString(),
-      updatedAt: Date.now(),
+      updatedAt: Date.now().toString(),
     });
 
     // Remove from orderbook
     const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
-    pipeline.zrem(bookKey, orderId);
+    multi.zRem(bookKey, orderId);
 
-    await pipeline.exec();
+    await multi.exec();
 
     console.log(`⏰ Order expired: ${orderId}`);
     return true;
@@ -335,10 +331,10 @@ export class OrderManagerRedis {
   ): Promise<{ bids: OrderbookLevel[]; asks: OrderbookLevel[] }> {
     // Check 10s cache first (orderbook doesn't change every millisecond)
     const cacheKey = `orderbook:${marketId}:${makerPositionId}:cache`;
-    const cached = await redis.get<{ bids: OrderbookLevel[]; asks: OrderbookLevel[] }>(cacheKey);
+    const cached = await redis.get(cacheKey);
 
     if (cached) {
-      return cached; // Upstash auto-deserializes JSON
+      return JSON.parse(cached); // Parse JSON from Redis
     }
 
     // Build from sorted sets
@@ -347,31 +343,31 @@ export class OrderManagerRedis {
 
     // Get all orders with scores (prices)
     const [bidsRaw, asksRaw] = await Promise.all([
-      redis.zrange(bidsKey, 0, -1, { rev: true, withScores: true }), // Reverse for bids (high to low)
-      redis.zrange(asksKey, 0, -1, { withScores: true }),    // Normal for asks (low to high)
+      redis.zRangeWithScores(bidsKey, 0, -1, { REV: true }), // Reverse for bids (high to low)
+      redis.zRangeWithScores(asksKey, 0, -1),    // Normal for asks (low to high)
     ]);
 
     // Parse and aggregate by price level
-    const bids = await this.aggregateOrderbook(bidsRaw as Array<{ score: number; member: string }>, true);
-    const asks = await this.aggregateOrderbook(asksRaw as Array<{ score: number; member: string }>, false);
+    const bids = await this.aggregateOrderbook(bidsRaw, true);
+    const asks = await this.aggregateOrderbook(asksRaw, false);
 
     const result = { bids, asks };
 
-    // Cache for 10 seconds - Upstash auto-stringifies JSON
-    await redis.set(cacheKey, result, { ex: 10 });
+    // Cache for 10 seconds
+    await redis.setEx(cacheKey, 10, JSON.stringify(result));
 
     return result;
   }
 
   private async aggregateOrderbook(
-    rawData: Array<{ score: number; member: string }>,
+    rawData: Array<{ score: number; value: string }>,
     isBid: boolean
   ): Promise<OrderbookLevel[]> {
     const levels = new Map<number, { size: number; count: number }>();
 
-    // rawData format: array of {score: price, member: orderId}
+    // rawData format: array of {score: price, value: orderId}
     for (const item of rawData) {
-      const orderId = item.member;
+      const orderId = item.value;
       const price = item.score;
 
       const order = await this.getOrder(orderId);
@@ -406,24 +402,27 @@ export class OrderManagerRedis {
   // ========== MARKET MANAGEMENT ==========
 
   async addMarket(market: Market): Promise<void> {
-    const pipeline = redis.pipeline();
+    const multi = redis.multi();
+
+    // Convert market to flat object for HSET
+    const marketHash: Record<string, string> = {};
+    for (const [key, value] of Object.entries(market)) {
+      marketHash[key] = String(value);
+    }
 
     // Store market as hash
-    pipeline.hset(`market:${market.marketId}`, {
-      ...market,
-      resolved: market.resolved.toString(),
-    });
+    multi.hSet(`market:${market.marketId}`, marketHash);
 
     // Add to markets set
-    pipeline.sadd("markets", market.marketId);
+    multi.sAdd("markets", market.marketId);
 
-    await pipeline.exec();
+    await multi.exec();
 
     console.log(`📊 New market: ${market.marketId} - "${market.question}"`);
   }
 
   async getMarket(marketId: string): Promise<Market | null> {
-    const marketData = await redis.hgetall(`market:${marketId}`);
+    const marketData = await redis.hGetAll(`market:${marketId}`);
 
     if (!marketData || Object.keys(marketData).length === 0) {
       return null;
@@ -448,14 +447,14 @@ export class OrderManagerRedis {
   }
 
   async getAllMarkets(): Promise<Market[]> {
-    const marketIds = await redis.smembers("markets");
+    const marketIds = await redis.sMembers("markets");
 
-    if (marketIds.length === 0) {
+    if (!marketIds || marketIds.length === 0) {
       return [];
     }
 
     const markets = await Promise.all(
-      marketIds.map((id) => this.getMarket(id))
+      marketIds.map((id: string) => this.getMarket(id))
     );
 
     return markets.filter((market): market is Market => market !== null);
@@ -464,12 +463,14 @@ export class OrderManagerRedis {
   // ========== STATS ==========
 
   async getOrderCount(): Promise<number> {
-    const markets = await redis.smembers("markets");
+    const markets = await redis.sMembers("markets");
+    if (!markets) return 0;
+
     let count = 0;
 
     for (const marketId of markets) {
-      const marketOrdersCount = await redis.scard(`market:${marketId}:orders`);
-      count += marketOrdersCount;
+      const marketOrdersCount = await redis.sCard(`market:${marketId}:orders`);
+      count += marketOrdersCount || 0;
     }
 
     return count;
