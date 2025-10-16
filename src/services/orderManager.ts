@@ -127,22 +127,29 @@ export class OrderManager {
   // Generate orderbook for a market
   getOrderbook(
     marketId: string,
-    makerPositionId: string
+    positionId: string
   ): { bids: OrderbookLevel[]; asks: OrderbookLevel[] } {
-    const orders = this.getMarketOrders(marketId).filter(
-      (o) =>
-        o.makerPositionId === makerPositionId &&
-        (o.status === OrderStatus.OPEN ||
-          o.status === OrderStatus.PARTIALLY_FILLED)
+    const restingOrders = this.getMarketOrders(marketId).filter(
+      (order) =>
+        (order.status === OrderStatus.OPEN ||
+          order.status === OrderStatus.PARTIALLY_FILLED)
     );
 
-    // Aggregate orders by price level
     const bids = this.aggregateOrders(
-      orders.filter((o) => o.side === OrderSide.BUY),
+      restingOrders.filter(
+        (order) =>
+          order.side === OrderSide.BUY &&
+          order.takerPositionId === positionId
+      ),
       true
     );
+
     const asks = this.aggregateOrders(
-      orders.filter((o) => o.side === OrderSide.SELL),
+      restingOrders.filter(
+        (order) =>
+          order.side === OrderSide.SELL &&
+          order.makerPositionId === positionId
+      ),
       false
     );
 
