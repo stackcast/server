@@ -127,7 +127,8 @@ export class OrderManager {
   // Generate orderbook for a market
   getOrderbook(
     marketId: string,
-    positionId: string
+    positionId: string,
+    _legacyPositionId?: string
   ): { bids: OrderbookLevel[]; asks: OrderbookLevel[] } {
     const restingOrders = this.getMarketOrders(marketId).filter(
       (order) =>

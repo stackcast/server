@@ -19,8 +19,16 @@ orderbookRoutes.get("/:marketId", async (req: Request, res: Response) => {
   // If no positionId specified, return both YES and NO orderbooks
   if (!positionId) {
     const [yesBook, noBook] = await Promise.all([
-      req.orderManager.getOrderbook(marketId, market.yesPositionId),
-      req.orderManager.getOrderbook(marketId, market.noPositionId),
+      req.orderManager.getOrderbook(
+        marketId,
+        market.yesPositionId,
+        market.noPositionId
+      ),
+      req.orderManager.getOrderbook(
+        marketId,
+        market.noPositionId,
+        market.yesPositionId
+      ),
     ]);
 
     return res.json({
@@ -48,7 +56,12 @@ orderbookRoutes.get("/:marketId", async (req: Request, res: Response) => {
   // Return specific position orderbook
   const orderbook = await req.orderManager.getOrderbook(
     marketId,
-    positionId as string
+    positionId as string,
+    market
+      ? positionId === market.yesPositionId
+        ? market.noPositionId
+        : market.yesPositionId
+      : undefined
   );
 
   res.json({
@@ -96,7 +109,8 @@ orderbookRoutes.get("/:marketId/price", async (req: Request, res: Response) => {
   // Get orderbook for YES position
   const orderbook = await req.orderManager.getOrderbook(
     marketId,
-    market.yesPositionId
+    market.yesPositionId,
+    market.noPositionId
   );
 
   // Calculate mid-price
