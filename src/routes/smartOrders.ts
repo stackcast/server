@@ -310,44 +310,50 @@ smartOrderRoutes.post("/", async (req: Request, res: Response) => {
         });
       }
 
-      // Place orders at each execution level
+      // Verify signature once for the market order (not per level)
+      // We verify the original order parameters that were signed
+      const totalMakerAmount = numericSize;
+      const estimatedTotalTakerAmount = Math.floor(plan.averagePrice * numericSize);
+
+      const verificationResult = await verifyOrderSignatureMiddleware({
+        maker,
+        taker: maker,
+        makerPositionId,
+        takerPositionId,
+        makerAmount: totalMakerAmount,
+        takerAmount: estimatedTotalTakerAmount,
+        salt: salt || "",
+        expiration: expiration || 0,
+        signature,
+        publicKey,
+      });
+
+      if (!verificationResult.valid) {
+        return res.status(400).json({
+          success: false,
+          error: `Signature verification failed: ${verificationResult.error}`,
+        });
+      }
+
+      // Place orders at each execution level (no per-level signature check needed)
+      // IMPORTANT: Market orders must TAKE liquidity (opposite side) not provide it
+      // If user wants to BUY, we place SELL orders to match against existing buyers
+      // If user wants to SELL, we place BUY orders to match against existing sellers
+      const oppositeSide = side === OrderSide.BUY ? OrderSide.SELL : OrderSide.BUY;
+
       const orders = [];
       for (const level of plan.levels) {
-        const levelSalt = salt || `${Date.now()}_${Math.random()}`;
+        const levelSalt = `${salt || Date.now()}_level_${level.price}`;
         const levelExpiration = expiration || 999999999;
 
-        // Verify signature for each sub-order
-        const makerAmount = level.size;
-        const takerAmount = level.size * level.price;
-
-        const verificationResult = await verifyOrderSignatureMiddleware({
-          maker,
-          taker: maker,
-          makerPositionId,
-          takerPositionId,
-          makerAmount,
-          takerAmount,
-          salt: levelSalt,
-          expiration: levelExpiration,
-          signature,
-          publicKey,
-        });
-
-        if (!verificationResult.valid) {
-          return res.status(400).json({
-            success: false,
-            error: `Signature verification failed for level @ ${level.price}: ${verificationResult.error}`,
-          });
-        }
-
-        // Add order to orderbook
+        // Add order to orderbook with OPPOSITE side to ensure matching
         const order = await orderManager.addOrder({
           maker,
           marketId: market.marketId,
           conditionId: market.conditionId,
           makerPositionId,
           takerPositionId,
-          side,
+          side: oppositeSide,
           price: level.price,
           size: level.size,
           salt: levelSalt,
