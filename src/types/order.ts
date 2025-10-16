@@ -5,6 +5,13 @@ export enum OrderSide {
   SELL = 'SELL'
 }
 
+// Trade execution types - how matching engine handles fills
+export enum TradeType {
+  NORMAL = 'NORMAL',   // Standard token swap (YES ↔ NO)
+  MINT = 'MINT',       // Auto-split collateral when complementary orders meet
+  MERGE = 'MERGE'      // Auto-merge pairs back to collateral during settlement
+}
+
 // Order lifecycle: OPEN → PARTIALLY_FILLED → FILLED (or CANCELLED/EXPIRED)
 export enum OrderStatus {
   PENDING = 'PENDING',      // Initial state (rarely used)
@@ -87,6 +94,7 @@ export interface Trade {
   takerOrderId: string;     // Incoming order ID
   timestamp: number;        // Unix ms timestamp
   txHash?: string;          // Stacks txid after on-chain settlement
+  tradeType?: TradeType;    // NORMAL, MINT, or MERGE execution
 }
 
 // Prediction market metadata and current pricing

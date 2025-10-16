@@ -1,9 +1,9 @@
-import { Router, Request, Response } from 'express';
+import { Request, Response, Router } from "express";
 
 export const orderbookRoutes = Router();
 
 // Get orderbook for a market
-orderbookRoutes.get('/:marketId', async (req: Request, res: Response) => {
+orderbookRoutes.get("/:marketId", async (req: Request, res: Response) => {
   const { marketId } = req.params;
   const { positionId } = req.query;
 
@@ -12,7 +12,7 @@ orderbookRoutes.get('/:marketId', async (req: Request, res: Response) => {
   if (!market) {
     return res.status(404).json({
       success: false,
-      error: 'Market not found'
+      error: "Market not found",
     });
   }
 
@@ -20,51 +20,54 @@ orderbookRoutes.get('/:marketId', async (req: Request, res: Response) => {
   if (!positionId) {
     const [yesBook, noBook] = await Promise.all([
       req.orderManager.getOrderbook(marketId, market.yesPositionId),
-      req.orderManager.getOrderbook(marketId, market.noPositionId)
+      req.orderManager.getOrderbook(marketId, market.noPositionId),
     ]);
 
     return res.json({
       success: true,
       market: {
         marketId: market.marketId,
-        question: market.question
+        question: market.question,
       },
       orderbooks: {
         yes: {
           positionId: market.yesPositionId,
           bids: yesBook.bids,
-          asks: yesBook.asks
+          asks: yesBook.asks,
         },
         no: {
           positionId: market.noPositionId,
           bids: noBook.bids,
-          asks: noBook.asks
-        }
+          asks: noBook.asks,
+        },
       },
-      timestamp: Date.now()
+      timestamp: Date.now(),
     });
   }
 
   // Return specific position orderbook
-  const orderbook = await req.orderManager.getOrderbook(marketId, positionId as string);
+  const orderbook = await req.orderManager.getOrderbook(
+    marketId,
+    positionId as string
+  );
 
   res.json({
     success: true,
     market: {
       marketId: market.marketId,
-      question: market.question
+      question: market.question,
     },
     orderbook: {
       positionId,
       bids: orderbook.bids,
-      asks: orderbook.asks
+      asks: orderbook.asks,
     },
-    timestamp: Date.now()
+    timestamp: Date.now(),
   });
 });
 
 // Get recent trades
-orderbookRoutes.get('/:marketId/trades', (req: Request, res: Response) => {
+orderbookRoutes.get("/:marketId/trades", (req: Request, res: Response) => {
   const { marketId } = req.params;
   const limit = parseInt(req.query.limit as string) || 50;
 
@@ -73,12 +76,12 @@ orderbookRoutes.get('/:marketId/trades', (req: Request, res: Response) => {
   res.json({
     success: true,
     trades,
-    count: trades.length
+    count: trades.length,
   });
 });
 
 // Get mid-price for a market
-orderbookRoutes.get('/:marketId/price', async (req: Request, res: Response) => {
+orderbookRoutes.get("/:marketId/price", async (req: Request, res: Response) => {
   const { marketId } = req.params;
 
   const market = await req.orderManager.getMarket(marketId);
@@ -86,12 +89,15 @@ orderbookRoutes.get('/:marketId/price', async (req: Request, res: Response) => {
   if (!market) {
     return res.status(404).json({
       success: false,
-      error: 'Market not found'
+      error: "Market not found",
     });
   }
 
   // Get orderbook for YES position
-  const orderbook = await req.orderManager.getOrderbook(marketId, market.yesPositionId);
+  const orderbook = await req.orderManager.getOrderbook(
+    marketId,
+    market.yesPositionId
+  );
 
   // Calculate mid-price
   let yesPrice = 50; // Default
@@ -117,8 +123,8 @@ orderbookRoutes.get('/:marketId/price', async (req: Request, res: Response) => {
       noMid: 100 - yesPrice,
       lastTrade: lastTradePrice,
       bestBid: orderbook.bids[0]?.price,
-      bestAsk: orderbook.asks[0]?.price
+      bestAsk: orderbook.asks[0]?.price,
     },
-    timestamp: Date.now()
+    timestamp: Date.now(),
   });
 });

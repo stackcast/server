@@ -1,5 +1,4 @@
 import express, { type Request, type Response } from "express";
-import { OrderManagerRedis } from "../services/orderManagerRedis";
 import { OrderSide, OrderType } from "../types/order";
 import { verifyOrderSignatureMiddleware } from "../utils/signatureVerification";
 import { SmartRouter, ExecutionPlan } from "../services/smartRouter";
@@ -44,7 +43,7 @@ export const smartOrderRoutes = express.Router();
  */
 smartOrderRoutes.post("/preview", async (req: Request, res: Response) => {
   try {
-    const orderManager = req.app.get("orderManager") as OrderManagerRedis;
+    const orderManager = req.orderManager;
     const smartRouter = new SmartRouter(orderManager);
 
     const { marketId, outcome, side, orderType, size, price, maxSlippage } = req.body;
@@ -185,7 +184,7 @@ smartOrderRoutes.post("/preview", async (req: Request, res: Response) => {
  */
 smartOrderRoutes.post("/", async (req: Request, res: Response) => {
   try {
-    const orderManager = req.app.get("orderManager") as OrderManagerRedis;
+    const orderManager = req.orderManager;
     const smartRouter = new SmartRouter(orderManager);
 
     const {
@@ -458,7 +457,7 @@ smartOrderRoutes.post("/", async (req: Request, res: Response) => {
  */
 smartOrderRoutes.post("/requirements", async (req: Request, res: Response) => {
   try {
-    const orderManager = req.app.get("orderManager") as OrderManagerRedis;
+    const orderManager = req.orderManager;
 
     const { maker, marketId, side, outcome, size } = req.body;
 

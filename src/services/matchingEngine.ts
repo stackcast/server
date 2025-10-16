@@ -1,4 +1,4 @@
-import { Order, OrderSide, OrderStatus, Trade } from '../types/order';
+import { Order, OrderSide, OrderStatus, Trade, TradeType } from '../types/order';
 import { OrderManagerRedis } from './orderManagerRedis';
 import { StacksSettlementService } from './stacksSettlement';
 import { randomBytes } from 'crypto';
@@ -159,6 +159,11 @@ export class MatchingEngine {
       // Execute at maker's price (sell order arrived first, gets their price)
       const matchPrice = sellOrder.price;
 
+      // Detect if this is a complementary trade (MINT opportunity)
+      // BUY YES + SELL NO at same market = can mint sets instead of swap
+      const isComplementaryTrade = this.detectComplementaryTrade(buyOrder, sellOrder);
+      const tradeType = isComplementaryTrade ? TradeType.MINT : TradeType.NORMAL;
+
       // Create trade
       const trade = this.createTrade({
         marketId,
@@ -171,7 +176,8 @@ export class MatchingEngine {
         size: matchSize,
         side: OrderSide.BUY, // Taker's side
         makerOrderId: sellOrder.orderId,
-        takerOrderId: buyOrder.orderId
+        takerOrderId: buyOrder.orderId,
+        tradeType,
       });
 
       this.trades.set(trade.tradeId, trade);
@@ -243,5 +249,36 @@ export class MatchingEngine {
   // Get trade by ID
   getTrade(tradeId: string): Trade | undefined {
     return this.trades.get(tradeId);
+  }
+
+  /**
+   * Detect if two orders are complementary (can use MINT mode)
+   *
+   * Complementary = BUY YES + SELL NO (or BUY NO + SELL YES)
+   * at prices that sum to 100¢
+   *
+   * Example:
+   * - Order A: BUY YES @ 66¢
+   * - Order B: SELL NO @ 34¢
+   * → These are complementary! Can mint sets instead of swap
+   *
+   * Benefits of MINT mode:
+   * - More gas efficient (no token transfers needed)
+   * - Cleaner user experience
+   * - Matches Polymarket's exchange behavior
+   */
+  private detectComplementaryTrade(buyOrder: Order, sellOrder: Order): boolean {
+    // Check if they're trading opposite outcomes
+    const buyingYES = buyOrder.takerPositionId; // What buyer wants
+    const sellingNO = sellOrder.makerPositionId; // What seller gives
+
+    // Complementary if:
+    // 1. Buyer wants YES and seller gives NO (or vice versa)
+    // 2. Prices sum to ~100 (within 1¢ tolerance for floating point)
+    const isOppositeOutcomes = buyingYES !== sellingNO;
+    const priceSum = buyOrder.price + sellOrder.price;
+    const pricesSumTo100 = Math.abs(priceSum - 100) < 1;
+
+    return isOppositeOutcomes && pricesSumTo100;
   }
 }

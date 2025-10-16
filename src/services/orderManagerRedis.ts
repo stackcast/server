@@ -335,10 +335,10 @@ export class OrderManagerRedis {
   ): Promise<{ bids: OrderbookLevel[]; asks: OrderbookLevel[] }> {
     // Check 10s cache first (orderbook doesn't change every millisecond)
     const cacheKey = `orderbook:${marketId}:${makerPositionId}:cache`;
-    const cached = await redis.get(cacheKey);
+    const cached = await redis.get<{ bids: OrderbookLevel[]; asks: OrderbookLevel[] }>(cacheKey);
 
     if (cached) {
-      return JSON.parse(cached as string);
+      return cached; // Upstash auto-deserializes JSON
     }
 
     // Build from sorted sets
@@ -357,8 +357,8 @@ export class OrderManagerRedis {
 
     const result = { bids, asks };
 
-    // Cache for 10 seconds
-    await redis.set(cacheKey, JSON.stringify(result), { ex: 10 });
+    // Cache for 10 seconds - Upstash auto-stringifies JSON
+    await redis.set(cacheKey, result, { ex: 10 });
 
     return result;
   }
