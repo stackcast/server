@@ -1,4 +1,4 @@
-import { Order, OrderSide, OrderStatus, Trade, TradeType } from '../types/order';
+import { Market, Order, OrderSide, OrderStatus, Trade, TradeType } from '../types/order';
 import { OrderManagerRedis } from './orderManagerRedis';
 import { StacksSettlementService } from './stacksSettlement';
 import { randomBytes } from 'crypto';
@@ -87,8 +87,8 @@ export class MatchingEngine {
     const matchTasks = markets
       .filter(market => !market.resolved)
       .flatMap(market => [
-        this.matchMarket(market.marketId, market.yesPositionId),
-        this.matchMarket(market.marketId, market.noPositionId),
+        this.matchMarket(market, market.yesPositionId),
+        this.matchMarket(market, market.noPositionId),
       ]);
 
     if (matchTasks.length === 0) {
@@ -127,17 +127,23 @@ export class MatchingEngine {
    *
    * Final state: All bids filled, asks have 150 @ 67¢ remaining
    */
-  private async matchMarket(marketId: string, makerPositionId: string): Promise<void> {
-    // Get all active orders for this position
-    const orders = (await this.orderManager.getMarketOrders(marketId))
-      .filter(o => o.makerPositionId === makerPositionId &&
-                   (o.status === OrderStatus.OPEN || o.status === OrderStatus.PARTIALLY_FILLED));
+  private async matchMarket(market: Market, positionId: string): Promise<void> {
+    // Get all active orders for this market and outcome
+    const orders = (await this.orderManager.getMarketOrders(market.marketId)).filter(
+      (order) =>
+        (order.status === OrderStatus.OPEN ||
+          order.status === OrderStatus.PARTIALLY_FILLED) &&
+        ((order.side === OrderSide.BUY && order.takerPositionId === positionId) ||
+          (order.side === OrderSide.SELL && order.makerPositionId === positionId))
+    );
 
     // Sort by price-time priority
-    const buyOrders = orders.filter(o => o.side === OrderSide.BUY)
+    const buyOrders = orders
+      .filter((order) => order.side === OrderSide.BUY)
       .sort((a, b) => b.price - a.price || a.createdAt - b.createdAt); // High→low, FIFO
 
-    const sellOrders = orders.filter(o => o.side === OrderSide.SELL)
+    const sellOrders = orders
+      .filter((order) => order.side === OrderSide.SELL)
       .sort((a, b) => a.price - b.price || a.createdAt - b.createdAt); // Low→high, FIFO
 
     // Two-pointer matching algorithm
@@ -166,7 +172,7 @@ export class MatchingEngine {
 
       // Create trade
       const trade = this.createTrade({
-        marketId,
+        marketId: market.marketId,
         conditionId: buyOrder.conditionId,
         makerPositionId: sellOrder.makerPositionId,
         takerPositionId: sellOrder.takerPositionId,
@@ -191,7 +197,9 @@ export class MatchingEngine {
       this.updateOrderState(buyOrder, matchSize);
       this.updateOrderState(sellOrder, matchSize);
 
-      console.log(`🔄 MATCH: ${matchSize} @ ${matchPrice} (${buyOrder.orderId} ↔️ ${sellOrder.orderId})`);
+      console.log(
+        `🔄 MATCH: ${matchSize} @ ${matchPrice} (${buyOrder.orderId} ↔️ ${sellOrder.orderId})`
+      );
 
       if (this.settlementService?.isEnabled()) {
         try {

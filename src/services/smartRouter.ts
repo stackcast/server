@@ -90,15 +90,9 @@ export class SmartRouter {
       outcome === "yes" ? market.yesPositionId : market.noPositionId;
 
     // Get orderbook for this position
-    const counterpartPositionId =
-      positionId === market.yesPositionId
-        ? market.noPositionId
-        : market.yesPositionId;
-
     const orderbook = await this.orderManager.getOrderbook(
       marketId,
-      positionId,
-      counterpartPositionId
+      positionId
     );
 
     // For BUY orders, we match against asks (sellers)

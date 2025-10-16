@@ -98,15 +98,19 @@ export class OrderManagerRedis {
 
     // 4. Add to price-sorted orderbook (enables matching engine to find best prices)
     // Sorted set score = price, enables O(log N) range queries
-    const primaryBookKey = this.getOrderbookKey(order.marketId, order);
-    const legacyBookKey = this.getLegacyOrderbookKey(order.marketId, order);
+    const bookPositionId = this.getBookPositionId(
+      order.side,
+      order.makerPositionId,
+      order.takerPositionId
+    );
+    const bookKey = this.buildOrderbookKey(
+      order.marketId,
+      bookPositionId,
+      order.side
+    );
 
     // Both buy and sell stored with score=price
-    multi.zAdd(primaryBookKey, { score: order.price, value: orderId });
-
-    if (legacyBookKey && legacyBookKey !== primaryBookKey) {
-      multi.zAdd(legacyBookKey, { score: order.price, value: orderId });
-    }
+    multi.zAdd(bookKey, { score: order.price, value: orderId });
 
     // Execute all 4 commands atomically
     await multi.exec();
@@ -115,11 +119,7 @@ export class OrderManagerRedis {
       `📝 New order: ${orderId} - ${order.side} ${order.size} @ ${order.price}`
     );
 
-    // Invalidate caches for both primary and legacy books
-    await this.invalidateOrderbookCaches(order.marketId, [
-      this.resolveBookPositionId(order),
-      order.makerPositionId,
-    ]);
+    await this.clearOrderbookCache(order.marketId, bookPositionId);
 
     return fullOrder;
   }
@@ -220,8 +220,16 @@ export class OrderManagerRedis {
       const newRemainingSize = order.remainingSize - fillSize;
       const newStatus =
         newRemainingSize <= 0 ? OrderStatus.FILLED : OrderStatus.PARTIALLY_FILLED;
-      const primaryBookKey = this.getOrderbookKey(order.marketId, order);
-      const legacyBookKey = this.getLegacyOrderbookKey(order.marketId, order);
+      const bookPositionId = this.getBookPositionId(
+        order.side,
+        order.makerPositionId,
+        order.takerPositionId
+      );
+      const bookKey = this.buildOrderbookKey(
+        order.marketId,
+        bookPositionId,
+        order.side
+      );
 
       const multi = redis.multi();
 
@@ -233,18 +241,12 @@ export class OrderManagerRedis {
       });
 
       if (newRemainingSize <= 0) {
-        multi.zRem(primaryBookKey, orderId);
-        if (legacyBookKey && legacyBookKey !== primaryBookKey) {
-          multi.zRem(legacyBookKey, orderId);
-        }
+        multi.zRem(bookKey, orderId);
       }
 
-      this.enqueueCacheInvalidations(multi, order.marketId, [
-        this.resolveBookPositionId(order),
-        order.makerPositionId,
-      ]);
-
       await multi.exec();
+
+      await this.clearOrderbookCache(order.marketId, bookPositionId);
 
       if (newRemainingSize <= 0) {
         console.log(`✅ Order filled: ${orderId}`);
@@ -280,19 +282,21 @@ export class OrderManagerRedis {
     });
 
     // Remove from orderbook
-    const primaryBookKey = this.getOrderbookKey(order.marketId, order);
-    const legacyBookKey = this.getLegacyOrderbookKey(order.marketId, order);
-    multi.zRem(primaryBookKey, orderId);
-    if (legacyBookKey && legacyBookKey !== primaryBookKey) {
-      multi.zRem(legacyBookKey, orderId);
-    }
-
-    this.enqueueCacheInvalidations(multi, order.marketId, [
-      this.resolveBookPositionId(order),
+    const bookPositionId = this.getBookPositionId(
+      order.side,
       order.makerPositionId,
-    ]);
+      order.takerPositionId
+    );
+    const bookKey = this.buildOrderbookKey(
+      order.marketId,
+      bookPositionId,
+      order.side
+    );
+    multi.zRem(bookKey, orderId);
 
     await multi.exec();
+
+    await this.clearOrderbookCache(order.marketId, bookPositionId);
 
     console.log(`❌ Order cancelled: ${orderId}`);
     return true;
@@ -319,19 +323,21 @@ export class OrderManagerRedis {
     });
 
     // Remove from orderbook
-    const primaryBookKey = this.getOrderbookKey(order.marketId, order);
-    const legacyBookKey = this.getLegacyOrderbookKey(order.marketId, order);
-    multi.zRem(primaryBookKey, orderId);
-    if (legacyBookKey && legacyBookKey !== primaryBookKey) {
-      multi.zRem(legacyBookKey, orderId);
-    }
-
-    this.enqueueCacheInvalidations(multi, order.marketId, [
-      this.resolveBookPositionId(order),
+    const bookPositionId = this.getBookPositionId(
+      order.side,
       order.makerPositionId,
-    ]);
+      order.takerPositionId
+    );
+    const bookKey = this.buildOrderbookKey(
+      order.marketId,
+      bookPositionId,
+      order.side
+    );
+    multi.zRem(bookKey, orderId);
 
     await multi.exec();
+
+    await this.clearOrderbookCache(order.marketId, bookPositionId);
 
     console.log(`⏰ Order expired: ${orderId}`);
     return true;
@@ -362,8 +368,7 @@ export class OrderManagerRedis {
    */
   async getOrderbook(
     marketId: string,
-    positionId: string,
-    legacyPositionId?: string
+    positionId: string
   ): Promise<{ bids: OrderbookLevel[]; asks: OrderbookLevel[] }> {
     // Check 10s cache first (orderbook doesn't change every millisecond)
     const cacheKey = `orderbook:${marketId}:${positionId}:cache`;
@@ -374,23 +379,11 @@ export class OrderManagerRedis {
     }
 
     // Build from sorted sets
-    const bidsKeys = [
-      `orderbook:${marketId}:${positionId}:buy`,
-      ...(legacyPositionId && legacyPositionId !== positionId
-        ? [`orderbook:${marketId}:${legacyPositionId}:buy`]
-        : []),
-    ];
-
-    const asksKeys = [
-      `orderbook:${marketId}:${positionId}:sell`,
-      ...(legacyPositionId && legacyPositionId !== positionId
-        ? [`orderbook:${marketId}:${legacyPositionId}:sell`]
-        : []),
-    ];
-
     const [bidsRaw, asksRaw] = await Promise.all([
-      this.collectOrderbookEntries(bidsKeys, true),
-      this.collectOrderbookEntries(asksKeys, false),
+      redis.zRangeWithScores(`orderbook:${marketId}:${positionId}:buy`, 0, -1, {
+        REV: true,
+      }),
+      redis.zRangeWithScores(`orderbook:${marketId}:${positionId}:sell`, 0, -1),
     ]);
 
     // Parse and aggregate by price level
@@ -405,39 +398,17 @@ export class OrderManagerRedis {
     return result;
   }
 
-  private async collectOrderbookEntries(
-    keys: string[],
-    isBid: boolean
-  ): Promise<Array<{ score: number; value: string }>> {
-    if (keys.length === 0) return [];
-
-    const results = await Promise.all(
-      keys.map((key) =>
-        isBid
-          ? redis.zRangeWithScores(key, 0, -1, { REV: true })
-          : redis.zRangeWithScores(key, 0, -1)
-      )
-    );
-
-    return results.flat();
-  }
-
   private async aggregateOrderbook(
     rawData: Array<{ score: number; value: string }>,
     isBid: boolean,
     positionId: string
   ): Promise<OrderbookLevel[]> {
     const levels = new Map<number, { size: number; count: number }>();
-    const seenOrders = new Set<string>();
 
     // rawData format: array of {score: price, value: orderId}
     for (const item of rawData) {
       const orderId = item.value;
       const price = item.score;
-
-      if (seenOrders.has(orderId)) {
-        continue;
-      }
 
       const order = await this.getOrder(orderId);
       if (!order) continue;
@@ -456,8 +427,6 @@ export class OrderManagerRedis {
       ) {
         continue;
       }
-
-      seenOrders.add(orderId);
 
       const existing = levels.get(price) || { size: 0, count: 0 };
       existing.size += order.remainingSize;
@@ -501,70 +470,27 @@ export class OrderManagerRedis {
 
   // ========== HELPERS ==========
 
-  private resolveBookPositionId(order: {
-    side: OrderSide;
-    makerPositionId: string;
-    takerPositionId: string;
-  }): string {
-    return order.side === OrderSide.BUY
-      ? order.takerPositionId
-      : order.makerPositionId;
-  }
-
-  private getOrderbookKey(
-    marketId: string,
-    order: {
-      side: OrderSide;
-      makerPositionId: string;
-      takerPositionId: string;
-    }
+  private getBookPositionId(
+    side: OrderSide,
+    makerPositionId: string,
+    takerPositionId: string
   ): string {
-    const positionId = this.resolveBookPositionId(order);
-    return `orderbook:${marketId}:${positionId}:${order.side.toLowerCase()}`;
+    return side === OrderSide.BUY ? takerPositionId : makerPositionId;
   }
 
-  private getLegacyOrderbookKey(
+  private buildOrderbookKey(
     marketId: string,
-    order: {
-      side: OrderSide;
-      makerPositionId: string;
-      takerPositionId: string;
-    }
-  ): string | null {
-    // Legacy stored both BUY and SELL under makerPositionId
-    const legacyPositionId = order.makerPositionId;
-    return `orderbook:${marketId}:${legacyPositionId}:${order.side.toLowerCase()}`;
+    positionId: string,
+    side: OrderSide
+  ): string {
+    return `orderbook:${marketId}:${positionId}:${side.toLowerCase()}`;
   }
 
-  private enqueueCacheInvalidations(
-    multi: ReturnType<typeof redis.multi>,
+  private async clearOrderbookCache(
     marketId: string,
-    positionIds: Array<string | undefined>
-  ) {
-    const unique = new Set(
-      positionIds.filter((id): id is string => Boolean(id))
-    );
-
-    for (const positionId of unique) {
-      multi.del(`orderbook:${marketId}:${positionId}:cache`);
-    }
-  }
-
-  private async invalidateOrderbookCaches(
-    marketId: string,
-    positionIds: Array<string | undefined>
-  ) {
-    const unique = Array.from(
-      new Set(positionIds.filter((id): id is string => Boolean(id)))
-    );
-
-    if (unique.length === 0) return;
-
-    await Promise.all(
-      unique.map((positionId) =>
-        redis.del(`orderbook:${marketId}:${positionId}:cache`)
-      )
-    );
+    positionId: string
+  ): Promise<void> {
+    await redis.del(`orderbook:${marketId}:${positionId}:cache`);
   }
 
   async getMarket(marketId: string): Promise<Market | null> {
