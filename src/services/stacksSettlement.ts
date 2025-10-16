@@ -26,12 +26,31 @@ type SettlementRequest = {
 };
 
 /**
- * Handles settlement of matched orders on the CTF exchange contract.
+ * Stacks Settlement Service - On-chain trade execution
  *
- * The service is a thin wrapper around @stacks/transactions that translates
- * the in-memory trade representation into the contract call expected by
- * ctf-exchange.clar. It remains opt-in – if configuration is missing we just
- * skip the broadcast so local development can continue without a signer.
+ * Bridges off-chain matching → on-chain settlement
+ *
+ * Flow:
+ * 1. Matching engine pairs orders off-chain (fast, no gas)
+ * 2. Settlement service translates match → ctf-exchange.fill-order() call
+ * 3. Broadcasts Stacks transaction with both maker + taker signatures
+ * 4. Smart contract verifies signatures, swaps position tokens atomically
+ * 5. Returns txid, updates trade record
+ *
+ * Why hybrid model?
+ * - Off-chain matching: Fast (100ms), no gas costs for failed matches
+ * - On-chain settlement: Trustless atomic swaps, verifiable on blockchain
+ * - Best of both: Speed + security
+ *
+ * Example: BUY 100 YES @ 66¢ matched with SELL 100 YES @ 66¢
+ * → Calls ctf-exchange.fill-order with:
+ *    - Maker order: SELL 100 YES, signature A
+ *    - Taker order: BUY 100 YES, signature B
+ *    - Fill amount: 100
+ * → Contract transfers: 100 YES (seller→buyer), 6600¢ worth of NO (buyer→seller)
+ * → 0.5% fee taken by protocol
+ *
+ * Opt-in design: If env vars missing, just skips broadcast (local dev friendly)
  */
 export class StacksSettlementService {
   private readonly enabled: boolean;

@@ -1,6 +1,29 @@
 import { Router, Request, Response } from 'express';
-import { randomBytes } from 'crypto';
+import { randomBytes, createHash } from 'crypto';
 import { Order, OrderStatus } from '../types/order';
+import { serializeCV, uintCV } from '@stacks/transactions';
+
+/**
+ * Generate position ID matching the Clarity contract's get-position-id function
+ * Contract: (sha256 (concat condition-id (to-consensus-buff? outcome-index)))
+ */
+function getPositionId(conditionId: string, outcomeIndex: number): string {
+  const conditionIdHex = conditionId.startsWith('0x') ? conditionId.slice(2) : conditionId;
+  const conditionIdBuff = Buffer.from(conditionIdHex, 'hex');
+
+  if (conditionIdBuff.length !== 32) {
+    throw new Error(`Condition ID must be 32 bytes (64 hex chars), got ${conditionIdBuff.length} bytes`);
+  }
+
+  // Serialize outcome index using Stacks consensus format (matches to-consensus-buff?)
+  const outcomeIndexBuff = Buffer.from(serializeCV(uintCV(outcomeIndex)));
+
+  // Concatenate and hash
+  const concatenated = Buffer.concat([conditionIdBuff, outcomeIndexBuff]);
+  const positionId = createHash('sha256').update(concatenated).digest('hex');
+
+  return positionId;
+}
 
 export const marketRoutes = Router();
 
@@ -33,8 +56,17 @@ marketRoutes.get('/:marketId', async (req: Request, res: Response) => {
   });
 });
 
-// Create new market (would typically be called by admin/oracle adapter)
+// Create new market (admin only - called by init script)
 marketRoutes.post('/', async (req: Request, res: Response) => {
+  // Check admin API key
+  const apiKey = req.headers['x-api-key'] || req.headers['authorization'];
+  if (!apiKey || apiKey !== process.env.ADMIN_API_KEY) {
+    return res.status(403).json({
+      success: false,
+      error: 'Forbidden: Admin API key required'
+    });
+  }
+
   const { question, creator, conditionId } = req.body;
 
   if (!question || !creator) {
@@ -44,13 +76,36 @@ marketRoutes.post('/', async (req: Request, res: Response) => {
     });
   }
 
-  const marketId = conditionId || `market_${Date.now()}_${randomBytes(8).toString('hex')}`;
-  const yesPositionId = `${marketId}_yes`;
-  const noPositionId = `${marketId}_no`;
+  // Require explicit condition ID (from blockchain event or oracle adapter)
+  // Markets should be created via oracle-adapter contract which generates the condition ID
+  if (!conditionId) {
+    return res.status(400).json({
+      success: false,
+      error: 'Missing required field: conditionId. Markets must be initialized through oracle-adapter contract first.'
+    });
+  }
+
+  // Normalize condition ID (remove 0x prefix if present)
+  const finalConditionId = conditionId.startsWith('0x') ? conditionId.slice(2) : conditionId;
+
+  // Ensure condition ID is 32 bytes (64 hex chars)
+  if (finalConditionId.length !== 64) {
+    return res.status(400).json({
+      success: false,
+      error: `Condition ID must be 32 bytes (64 hex chars), got ${finalConditionId.length / 2} bytes`
+    });
+  }
+
+  // Generate market ID
+  const marketId = `market_${Date.now()}_${randomBytes(8).toString('hex')}`;
+
+  // Generate position IDs using the same algorithm as the contract
+  const yesPositionId = getPositionId(finalConditionId, 0);
+  const noPositionId = getPositionId(finalConditionId, 1);
 
   const market = {
     marketId,
-    conditionId: conditionId || marketId,
+    conditionId: finalConditionId,
     question,
     creator,
     yesPositionId,

@@ -9,20 +9,51 @@ import { randomBytes } from "crypto";
 import { redis } from "./redisClient";
 
 /**
- * Redis-based OrderManager for production persistence
+ * Redis-based Order Manager - Production-grade order storage and indexing
  *
- * Data structure:
- * - order:{orderId} -> Hash (Order object)
- * - market:{marketId}:orders -> Set (order IDs)
- * - user:{address}:orders -> Set (order IDs)
- * - orderbook:{marketId}:{positionId}:bids -> Sorted Set (score=price, member=orderId)
- * - orderbook:{marketId}:{positionId}:asks -> Sorted Set (score=price, member=orderId)
- * - market:{marketId} -> Hash (Market object)
- * - markets -> Set (market IDs)
+ * Why Redis?
+ * - Fast sorted sets for price-ordered orderbook (O(log N) inserts)
+ * - Atomic operations prevent race conditions during matching
+ * - Persistence survives server restarts
+ * - Scales horizontally with Upstash
+ *
+ * Data structure design:
+ * ┌─────────────────────────────────────────────────────────────────────┐
+ * │ Redis Key                            │ Type        │ Purpose        │
+ * ├─────────────────────────────────────────────────────────────────────┤
+ * │ order:{orderId}                      │ Hash        │ Full order     │
+ * │ market:{marketId}:orders             │ Set         │ Order IDs      │
+ * │ user:{address}:orders                │ Set         │ User's orders  │
+ * │ orderbook:{marketId}:{posId}:buy     │ Sorted Set  │ Bids (price)   │
+ * │ orderbook:{marketId}:{posId}:sell    │ Sorted Set  │ Asks (price)   │
+ * │ orderbook:{marketId}:{posId}:cache   │ String      │ 10s cache      │
+ * │ market:{marketId}                    │ Hash        │ Market data    │
+ * │ markets                              │ Set         │ All market IDs │
+ * │ lock:order:{orderId}                 │ String      │ Fill lock      │
+ * └─────────────────────────────────────────────────────────────────────┘
+ *
+ * Example flow for "BUY 100 YES @ 66¢":
+ * 1. addOrder() → stores in order:{id}, adds to sorted set @ score=66
+ * 2. matchingEngine → reads from sorted set (auto-sorted by price)
+ * 3. fillOrder() → acquires lock, updates filledSize, removes if filled
  */
 export class OrderManagerRedis {
   // ========== ORDER MANAGEMENT ==========
 
+  /**
+   * Add new order to Redis - atomically stores and indexes
+   *
+   * Atomic pipeline ensures all-or-nothing:
+   * 1. Store full order as hash
+   * 2. Add to market index (for fetching all market orders)
+   * 3. Add to user index (for portfolio view)
+   * 4. Add to sorted orderbook (for matching engine)
+   *
+   * Example: BUY 100 YES @ 66¢
+   *   - Stored at order:{orderId}
+   *   - Added to orderbook:market1:0xabc...:buy with score=66
+   *   - Matching engine will see this at position 66 in sorted set
+   */
   async addOrder(
     order: Omit<
       Order,
@@ -47,35 +78,35 @@ export class OrderManagerRedis {
       updatedAt: now,
     };
 
-    // Use Redis pipeline for atomic multi-command transaction
+    // Redis pipeline = all commands execute atomically (all succeed or all fail)
     const pipeline = redis.pipeline();
 
-    // Store order as hash
+    // 1. Store complete order as hash (key-value pairs)
     pipeline.hset(`order:${orderId}`, {
       ...fullOrder,
-      // Stringify complex fields
+      // Redis stores everything as strings, convert enums
       side: fullOrder.side.toString(),
       status: fullOrder.status.toString(),
     });
 
-    // Index by market
+    // 2. Index by market (enables getMarketOrders query)
     pipeline.sadd(`market:${order.marketId}:orders`, orderId);
 
-    // Index by user
+    // 3. Index by user (enables getUserOrders query)
     pipeline.sadd(`user:${order.maker}:orders`, orderId);
 
-    // Add to orderbook sorted set (score = price for efficient range queries)
-    // Use makerPositionId for orderbook organization
+    // 4. Add to price-sorted orderbook (enables matching engine to find best prices)
+    // Sorted set score = price, enables O(log N) range queries
     const bookKey = `orderbook:${order.marketId}:${order.makerPositionId}:${order.side.toLowerCase()}`;
     if (order.side === OrderSide.BUY) {
-      // Bids: higher price = higher score (reverse order later)
+      // Bids: stored with score=price (we'll reverse when reading for high→low)
       pipeline.zadd(bookKey, { score: order.price, member: orderId });
     } else {
-      // Asks: lower price = higher score
+      // Asks: stored with score=price (read as-is for low→high)
       pipeline.zadd(bookKey, { score: order.price, member: orderId });
     }
 
-    // Execute all commands atomically
+    // Execute all 4 commands atomically
     await pipeline.exec();
 
     console.log(
@@ -123,6 +154,25 @@ export class OrderManagerRedis {
     return orders.filter((order): order is Order => order !== null);
   }
 
+  /**
+   * Fill order - update filled amount atomically with distributed lock
+   *
+   * Why locks?
+   * - Matching engine runs every 100ms, multiple matches can happen simultaneously
+   * - Without locks: race condition where 2 matches both think order has 100 remaining
+   * - With locks: only 1 match can update at a time, prevents double-spending
+   *
+   * Lock mechanism (since Upstash doesn't support Redis WATCH):
+   * 1. Try to acquire exclusive lock (SET NX = set if not exists)
+   * 2. If locked by another process, return false (caller retries)
+   * 3. Read order, validate, update filledSize
+   * 4. Remove from orderbook if fully filled
+   * 5. Release lock
+   *
+   * Example: Order size=100, two matches of 60 each arrive simultaneously
+   *   Match A: acquires lock, fills 60, remaining=40, releases lock
+   *   Match B: acquires lock, tries to fill 60 but only 40 remaining, fills 40, releases lock
+   */
   async fillOrder(orderId: string, fillSize: number): Promise<boolean> {
     if (fillSize <= 0) {
       return false;
@@ -130,12 +180,12 @@ export class OrderManagerRedis {
 
     const orderKey = `order:${orderId}`;
 
-    // Per-order lock to serialize fills (Upstash doesn't support WATCH for optimistic locking)
+    // Distributed lock prevents concurrent fills (critical for matching engine)
     const lockKey = `lock:order:${orderId}`;
-    const lockId = randomBytes(8).toString("hex");
-    const locked = await redis.set(lockKey, lockId, { nx: true, px: 5000 });
+    const lockId = randomBytes(8).toString("hex"); // Unique lock ID to prevent accidental unlock
+    const locked = await redis.set(lockKey, lockId, { nx: true, px: 5000 }); // 5s timeout
     if (locked !== "OK") {
-      return false; // busy; caller may retry with backoff
+      return false; // Another process is filling this order, retry later
     }
 
     try {
@@ -258,11 +308,32 @@ export class OrderManagerRedis {
 
   // ========== ORDERBOOK MANAGEMENT ==========
 
+  /**
+   * Get orderbook snapshot - aggregates orders by price level
+   *
+   * Performance optimization:
+   * - 10-second cache reduces load (orderbooks don't change that fast)
+   * - Sorted sets pre-sorted by price (O(log N) range query)
+   * - Aggregation happens in-memory (sum sizes at same price)
+   *
+   * Example output for YES tokens:
+   * {
+   *   bids: [
+   *     { price: 68, size: 200, orderCount: 2 },  // Best bid
+   *     { price: 66, size: 500, orderCount: 3 },
+   *   ],
+   *   asks: [
+   *     { price: 70, size: 150, orderCount: 1 },  // Best ask
+   *     { price: 72, size: 300, orderCount: 2 },
+   *   ]
+   * }
+   * → Spread = 70 - 68 = 2¢
+   */
   async getOrderbook(
     marketId: string,
     makerPositionId: string
   ): Promise<{ bids: OrderbookLevel[]; asks: OrderbookLevel[] }> {
-    // Check cache first (10 second TTL)
+    // Check 10s cache first (orderbook doesn't change every millisecond)
     const cacheKey = `orderbook:${marketId}:${makerPositionId}:cache`;
     const cached = await redis.get(cacheKey);
 

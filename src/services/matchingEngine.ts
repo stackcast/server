@@ -3,6 +3,30 @@ import { OrderManagerRedis } from './orderManagerRedis';
 import { StacksSettlementService } from './stacksSettlement';
 import { randomBytes } from 'crypto';
 
+/**
+ * Matching Engine - Continuous order matching with price-time priority
+ *
+ * How it works:
+ * 1. Runs every 100ms in a loop (start() method)
+ * 2. For each market + position, sorts orders by price
+ * 3. Matches when buy price >= sell price
+ * 4. Executes at maker's price (maker = first in book)
+ * 5. Submits trades to settlement service for on-chain execution
+ *
+ * Matching algorithm (price-time priority):
+ * - Orders sorted by: best price first, then earliest timestamp
+ * - BUY orders: highest price wins (willing to pay more)
+ * - SELL orders: lowest price wins (willing to accept less)
+ * - When prices cross (buy >= sell): match and execute
+ *
+ * Example:
+ * Orderbook:
+ *   Bids: [68¢×100, 66¢×200]
+ *   Asks: [70¢×150, 72¢×300]
+ * New order: BUY 50 @ 71¢
+ * → Matches with best ask (70¢×150), executes 50 @ 70¢
+ * → Buyer gets better price (wanted 71¢, got 70¢)
+ */
 export class MatchingEngine {
   private orderManager: OrderManagerRedis;
   private running: boolean = false;
@@ -74,20 +98,49 @@ export class MatchingEngine {
     await Promise.all(matchTasks);
   }
 
-  // Match a specific market/position
+  /**
+   * Match orders for a specific market and position token
+   *
+   * Algorithm (price-time priority):
+   * 1. Load all OPEN/PARTIALLY_FILLED orders for this position
+   * 2. Sort BUY orders: high→low price, then FIFO (earliest first)
+   * 3. Sort SELL orders: low→high price, then FIFO
+   * 4. Walk through both sorted lists:
+   *    - If buyPrice >= sellPrice: match at sell price (maker's price)
+   *    - Fill min(buySize, sellSize)
+   *    - Move to next order when one is fully filled
+   *
+   * Example:
+   * Bids (sorted): [70¢×100 (new), 68¢×200 (old)]
+   * Asks (sorted): [65¢×150 (old), 67¢×300 (new)]
+   *
+   * Match 1: 70¢×100 vs 65¢×150 → execute 100 @ 65¢
+   *   - Buyer wanted 70¢, got 65¢ (saved 5¢)
+   *   - Seller wanted 65¢, got 65¢ (fair)
+   *   - Buyer order FILLED, seller has 50 remaining
+   *
+   * Match 2: 68¢×200 vs 65¢×50 → execute 50 @ 65¢
+   *   - Seller order FILLED, buyer has 150 remaining
+   *
+   * Match 3: 68¢×150 vs 67¢×300 → execute 150 @ 67¢
+   *   - Buyer order FILLED, seller has 150 remaining
+   *
+   * Final state: All bids filled, asks have 150 @ 67¢ remaining
+   */
   private async matchMarket(marketId: string, makerPositionId: string): Promise<void> {
+    // Get all active orders for this position
     const orders = (await this.orderManager.getMarketOrders(marketId))
       .filter(o => o.makerPositionId === makerPositionId &&
                    (o.status === OrderStatus.OPEN || o.status === OrderStatus.PARTIALLY_FILLED));
 
-    // Separate into buy and sell orders
+    // Sort by price-time priority
     const buyOrders = orders.filter(o => o.side === OrderSide.BUY)
-      .sort((a, b) => b.price - a.price || a.createdAt - b.createdAt); // High to low, then FIFO
+      .sort((a, b) => b.price - a.price || a.createdAt - b.createdAt); // High→low, FIFO
 
     const sellOrders = orders.filter(o => o.side === OrderSide.SELL)
-      .sort((a, b) => a.price - b.price || a.createdAt - b.createdAt); // Low to high, then FIFO
+      .sort((a, b) => a.price - b.price || a.createdAt - b.createdAt); // Low→high, FIFO
 
-    // Match orders
+    // Two-pointer matching algorithm
     let buyIndex = 0;
     let sellIndex = 0;
 
@@ -95,15 +148,15 @@ export class MatchingEngine {
       const buyOrder = buyOrders[buyIndex];
       const sellOrder = sellOrders[sellIndex];
 
-      // Check if orders can match (buy price >= sell price)
+      // Check if prices cross (necessary condition for match)
       if (buyOrder.price < sellOrder.price) {
-        break; // No more matches possible
+        break; // No more matches possible (spread is positive)
       }
 
-      // Calculate match size
+      // Calculate how much to fill (limited by smaller order)
       const matchSize = Math.min(buyOrder.remainingSize, sellOrder.remainingSize);
 
-      // Use sell order's price (maker gets better price)
+      // Execute at maker's price (sell order arrived first, gets their price)
       const matchPrice = sellOrder.price;
 
       // Create trade
