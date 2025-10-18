@@ -1,4 +1,5 @@
 import { Request, Response, Router } from "express";
+import { deriveYesNoPrices, PRICE_SCALE } from "../utils/pricing";
 
 export const orderbookRoutes = Router();
 
@@ -99,31 +100,41 @@ orderbookRoutes.get("/:marketId/price", async (req: Request, res: Response) => {
     market.yesPositionId
   );
 
-  // Calculate mid-price
-  let yesPrice = 50; // Default
-  if (orderbook.bids.length > 0 && orderbook.asks.length > 0) {
-    const bestBid = orderbook.bids[0].price;
-    const bestAsk = orderbook.asks[0].price;
-    yesPrice = (bestBid + bestAsk) / 2;
-  } else if (orderbook.bids.length > 0) {
-    yesPrice = orderbook.bids[0].price;
-  } else if (orderbook.asks.length > 0) {
-    yesPrice = orderbook.asks[0].price;
-  }
-
   // Get last trade price
   const trades = req.matchingEngine.getTrades(marketId, 1);
-  const lastTradePrice = trades[0]?.price;
+  const latestTrade = trades[0];
+
+  let lastTradePrice: number | undefined;
+  if (latestTrade) {
+    const involvesYesPosition =
+      latestTrade.makerPositionId === market.yesPositionId ||
+      latestTrade.takerPositionId === market.yesPositionId;
+    lastTradePrice = involvesYesPosition
+      ? latestTrade.price
+      : Math.max(0, PRICE_SCALE - latestTrade.price);
+  }
+
+  const bestBid = orderbook.bids[0]?.price;
+  const bestAsk = orderbook.asks[0]?.price;
+
+  const { yesPrice, noPrice } = deriveYesNoPrices({
+    bestBid,
+    bestAsk,
+    lastTradePrice,
+    currentYesPrice: market.yesPrice,
+  });
+
+  await req.orderManager.updateMarketPrices(market.marketId, yesPrice, noPrice);
 
   res.json({
     success: true,
     marketId,
     prices: {
       yesMid: yesPrice,
-      noMid: 100 - yesPrice,
+      noMid: noPrice,
       lastTrade: lastTradePrice,
-      bestBid: orderbook.bids[0]?.price,
-      bestAsk: orderbook.asks[0]?.price,
+      bestBid,
+      bestAsk,
     },
     timestamp: Date.now(),
   });

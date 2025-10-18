@@ -2,6 +2,7 @@ import { serializeCV, uintCV } from "@stacks/transactions";
 import { createHash, randomBytes } from "crypto";
 import { Request, Response, Router } from "express";
 import { Order, OrderStatus } from "../types/order";
+import { PRICE_SCALE } from "../utils/pricing";
 
 /**
  * Generate position ID matching the Clarity contract's get-position-id function
@@ -119,8 +120,8 @@ marketRoutes.post("/", async (req: Request, res: Response) => {
     creator,
     yesPositionId,
     noPositionId,
-    yesPrice: 50, // Default to 50/50
-    noPrice: 50,
+    yesPrice: PRICE_SCALE / 2,
+    noPrice: PRICE_SCALE / 2,
     volume24h: 0,
     createdAt: Date.now(),
     resolved: false,
@@ -149,6 +150,14 @@ marketRoutes.get("/:marketId/stats", async (req: Request, res: Response) => {
   const orders: Order[] = await req.orderManager.getMarketOrders(marketId);
   const trades = req.matchingEngine.getTrades(marketId);
 
+  const latestTrade = trades[0];
+  const lastPrice = latestTrade
+    ? latestTrade.makerPositionId === market.yesPositionId ||
+      latestTrade.takerPositionId === market.yesPositionId
+      ? latestTrade.price
+      : Math.max(0, PRICE_SCALE - latestTrade.price)
+    : market.yesPrice;
+
   res.json({
     success: true,
     stats: {
@@ -160,7 +169,7 @@ marketRoutes.get("/:marketId/stats", async (req: Request, res: Response) => {
       ).length,
       totalTrades: trades.length,
       volume24h: market.volume24h,
-      lastPrice: trades[0]?.price || market.yesPrice,
+      lastPrice,
     },
   });
 });

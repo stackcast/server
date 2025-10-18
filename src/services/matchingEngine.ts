@@ -2,22 +2,31 @@ import { Market, Order, OrderSide, OrderStatus, Trade, TradeType } from '../type
 import { OrderManagerRedis } from './orderManagerRedis';
 import { StacksSettlementService } from './stacksSettlement';
 import { randomBytes } from 'crypto';
+import { deriveYesNoPrices, PRICE_SCALE } from '../utils/pricing';
 
 /**
  * Matching Engine - Continuous order matching with price-time priority
  *
  * How it works:
  * 1. Runs every 100ms in a loop (start() method)
- * 2. For each market + position, sorts orders by price
- * 3. Matches when buy price >= sell price
- * 4. Executes at maker's price (maker = first in book)
- * 5. Submits trades to settlement service for on-chain execution
+ * 2. Fetches ALL orders from Redis for each market + position
+ * 3. Sorts orders by price-time priority in memory (temporary)
+ * 4. Matches when buy price >= sell price
+ * 5. Executes at maker's price (maker = first in book)
+ * 6. Updates market prices using bestBid/bestAsk from sorted arrays (NO cache hit)
+ * 7. Submits trades to settlement service for on-chain execution
+ * 8. Discards in-memory order list (re-fetch next cycle to get new orders)
  *
  * Matching algorithm (price-time priority):
  * - Orders sorted by: best price first, then earliest timestamp
  * - BUY orders: highest price wins (willing to pay more)
  * - SELL orders: lowest price wins (willing to accept less)
  * - When prices cross (buy >= sell): match and execute
+ *
+ * Performance:
+ * - Each cycle: 1 Redis fetch per market (getMarketOrders)
+ * - Best bid/ask calculated from sorted arrays (no redundant orderbook fetch)
+ * - New orders submitted during cycle picked up in next 100ms cycle
  *
  * Example:
  * Orderbook:
@@ -149,6 +158,11 @@ export class MatchingEngine {
     // Two-pointer matching algorithm
     let buyIndex = 0;
     let sellIndex = 0;
+    let lastTradePriceForPosition: number | undefined;
+
+    // Track best bid/ask for price update (avoid redundant orderbook fetch)
+    let bestBid: number | undefined;
+    let bestAsk: number | undefined;
 
     while (buyIndex < buyOrders.length && sellIndex < sellOrders.length) {
       const buyOrder = buyOrders[buyIndex];
@@ -165,10 +179,18 @@ export class MatchingEngine {
       // Execute at maker's price (sell order arrived first, gets their price)
       const matchPrice = sellOrder.price;
 
-      // Detect if this is a complementary trade (MINT opportunity)
-      // BUY YES + SELL NO at same market = can mint sets instead of swap
-      const isComplementaryTrade = this.detectComplementaryTrade(buyOrder, sellOrder);
-      const tradeType = isComplementaryTrade ? TradeType.MINT : TradeType.NORMAL;
+      // Detect trade type: MINT (both BUY), MERGE (both SELL), or NORMAL (BUY+SELL)
+      let tradeType = TradeType.NORMAL;
+      if (this.detectComplementaryTrade(buyOrder, sellOrder)) {
+        // Both are BUY → MINT
+        if (buyOrder.side === OrderSide.BUY && sellOrder.side === OrderSide.BUY) {
+          tradeType = TradeType.MINT;
+        }
+        // Both are SELL → MERGE
+        else if (buyOrder.side === OrderSide.SELL && sellOrder.side === OrderSide.SELL) {
+          tradeType = TradeType.MERGE;
+        }
+      }
 
       // Create trade
       const trade = this.createTrade({
@@ -187,6 +209,8 @@ export class MatchingEngine {
       });
 
       this.trades.set(trade.tradeId, trade);
+
+      lastTradePriceForPosition = matchPrice;
 
       // Update orders (await both fills)
       await Promise.all([
@@ -224,6 +248,72 @@ export class MatchingEngine {
       if (buyOrder.remainingSize <= 0) buyIndex++;
       if (sellOrder.remainingSize <= 0) sellIndex++;
     }
+
+    // Calculate best bid/ask from sorted orders (no need to re-fetch orderbook)
+    // Best bid = highest buy order still open
+    for (const order of buyOrders) {
+      if (order.remainingSize > 0) {
+        bestBid = order.price;
+        break;
+      }
+    }
+
+    // Best ask = lowest sell order still open
+    for (const order of sellOrders) {
+      if (order.remainingSize > 0) {
+        bestAsk = order.price;
+        break;
+      }
+    }
+
+    await this.refreshMarketPrices(
+      market,
+      positionId,
+      lastTradePriceForPosition,
+      bestBid,
+      bestAsk
+    );
+  }
+
+  private async refreshMarketPrices(
+    market: Market,
+    positionId: string,
+    lastTradePrice?: number,
+    bestBid?: number,
+    bestAsk?: number
+  ): Promise<void> {
+    try {
+      // bestBid/bestAsk now passed from matchMarket() - no need to fetch orderbook again!
+
+      let effectiveLastTrade: number | undefined;
+      if (typeof lastTradePrice === 'number') {
+        effectiveLastTrade =
+          positionId === market.yesPositionId
+            ? lastTradePrice
+            : Math.max(0, PRICE_SCALE - lastTradePrice);
+      }
+
+      const { yesPrice, noPrice } = deriveYesNoPrices({
+        bestBid,
+        bestAsk,
+        lastTradePrice: effectiveLastTrade,
+        currentYesPrice: market.yesPrice,
+      });
+
+      await this.orderManager.updateMarketPrices(
+        market.marketId,
+        yesPrice,
+        noPrice
+      );
+
+      market.yesPrice = yesPrice;
+      market.noPrice = noPrice;
+    } catch (error) {
+      console.error(
+        `Failed to refresh market prices for ${market.marketId}:`,
+        error
+      );
+    }
   }
 
   private createTrade(params: Omit<Trade, 'tradeId' | 'timestamp'>): Trade {
@@ -259,34 +349,53 @@ export class MatchingEngine {
     return this.trades.get(tradeId);
   }
 
+  recordTradeSettlement(tradeId: string, txHash: string): void {
+    const trade = this.trades.get(tradeId);
+    if (trade) {
+      this.trades.set(tradeId, { ...trade, txHash });
+    }
+  }
+
   /**
-   * Detect if two orders are complementary (can use MINT mode)
+   * Detect trade type based on order sides and outcomes
    *
-   * Complementary = BUY YES + SELL NO (or BUY NO + SELL YES)
-   * at prices that sum to 100¢
+   * Three types of matches:
    *
-   * Example:
-   * - Order A: BUY YES @ 66¢
-   * - Order B: SELL NO @ 34¢
-   * → These are complementary! Can mint sets instead of swap
+   * 1. MINT: Both BUY orders for opposite outcomes (BUY YES + BUY NO)
+   *    - Prices sum to ~100¢ (e.g., 60¢ + 40¢)
+   *    - Exchange takes sBTC from both buyers
+   *    - Calls split-position to mint YES+NO tokens
+   *    - Gives each buyer their desired outcome
    *
-   * Benefits of MINT mode:
-   * - More gas efficient (no token transfers needed)
-   * - Cleaner user experience
-   * - Matches Polymarket's exchange behavior
+   * 2. MERGE: Both SELL orders for opposite outcomes (SELL YES + SELL NO)
+   *    - Prices sum to ~100¢ (e.g., 35¢ + 65¢)
+   *    - Exchange takes YES+NO tokens from both sellers
+   *    - Calls merge-positions to burn and recover sBTC
+   *    - Gives each seller their share of sBTC
+   *
+   * 3. NORMAL: BUY + SELL for same outcome (traditional swap)
+   *    - Buyer sends sBTC to seller
+   *    - Seller sends outcome tokens to buyer
    */
   private detectComplementaryTrade(buyOrder: Order, sellOrder: Order): boolean {
-    // Check if they're trading opposite outcomes
-    const buyingYES = buyOrder.takerPositionId; // What buyer wants
-    const sellingNO = sellOrder.makerPositionId; // What seller gives
+    // MINT mode: Both are BUY orders for opposite outcomes
+    if (buyOrder.side === OrderSide.BUY && sellOrder.side === OrderSide.BUY) {
+      const buyingDifferentOutcomes = buyOrder.takerPositionId !== sellOrder.takerPositionId;
+      const priceSum = buyOrder.price + sellOrder.price;
+      const pricesSumTo100 = Math.abs(priceSum - 1_000_000) < 10_000; // Within 0.01 sBTC tolerance
 
-    // Complementary if:
-    // 1. Buyer wants YES and seller gives NO (or vice versa)
-    // 2. Prices sum to ~100 (within 1¢ tolerance for floating point)
-    const isOppositeOutcomes = buyingYES !== sellingNO;
-    const priceSum = buyOrder.price + sellOrder.price;
-    const pricesSumTo100 = Math.abs(priceSum - 100) < 1;
+      return buyingDifferentOutcomes && pricesSumTo100;
+    }
 
-    return isOppositeOutcomes && pricesSumTo100;
+    // MERGE mode: Both are SELL orders for opposite outcomes
+    if (buyOrder.side === OrderSide.SELL && sellOrder.side === OrderSide.SELL) {
+      const sellingDifferentOutcomes = buyOrder.makerPositionId !== sellOrder.makerPositionId;
+      const priceSum = buyOrder.price + sellOrder.price;
+      const pricesSumTo100 = Math.abs(priceSum - 1_000_000) < 10_000;
+
+      return sellingDifferentOutcomes && pricesSumTo100;
+    }
+
+    return false;
   }
 }

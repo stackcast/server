@@ -9,6 +9,7 @@ import {
 } from "@stacks/transactions";
 import { Buffer } from "buffer";
 import type { Order, Trade } from "../types/order";
+import { TradeType } from "../types/order";
 
 type SettlementConfig = {
   network: StacksNetworkName;
@@ -110,6 +111,32 @@ export class StacksSettlementService {
       return undefined;
     }
 
+    const { trade, makerOrder, takerOrder, fillAmount } = request;
+
+    // Route to correct contract function based on trade type
+    switch (trade.tradeType) {
+      case TradeType.MINT:
+        // MINT trades execute as NORMAL - users already split their sBTC into tokens
+        return this.submitFillNormal(request);
+      case TradeType.MERGE:
+        return this.submitFillMerge(request);
+      case TradeType.NORMAL:
+      default:
+        return this.submitFillNormal(request);
+    }
+  }
+
+  /**
+   * NORMAL mode: Traditional token swap (BUY + SELL)
+   * Calls: ctf-exchange.fill-order
+   */
+  private async submitFillNormal(
+    request: SettlementRequest
+  ): Promise<string | undefined> {
+    if (!this.contractAddress || !this.contractName || !this.operatorKey) {
+      return undefined;
+    }
+
     const { makerOrder, takerOrder, fillAmount } = request;
 
     const makerAmount = this.ensureInteger(makerOrder.size, "maker size");
@@ -123,25 +150,17 @@ export class StacksSettlementService {
       makerOrder.expiration ?? takerOrder.expiration
     );
 
-    // Validate signatures are present
-    if (!makerOrder.signature || !takerOrder.signature) {
-      throw new Error(
-        "Both maker and taker signatures are required for settlement"
-      );
+    // Validate maker signature is present (taker signature optional for settlement)
+    if (!makerOrder.signature) {
+      throw new Error("Maker signature is required for settlement");
     }
 
-    // Ensure signatures are 65 bytes (130 hex chars)
+    // Ensure signature is 65 bytes (130 hex chars)
     const makerSig = makerOrder.signature.replace(/^0x/, "");
-    const takerSig = takerOrder.signature.replace(/^0x/, "");
 
     if (makerSig.length !== 130) {
       throw new Error(
         `Maker signature must be 65 bytes (130 hex chars), got ${makerSig.length} chars`
-      );
-    }
-    if (takerSig.length !== 130) {
-      throw new Error(
-        `Taker signature must be 65 bytes (130 hex chars), got ${takerSig.length} chars`
       );
     }
 
@@ -155,7 +174,6 @@ export class StacksSettlementService {
       standardPrincipalCV(takerOrder.maker),
       bufferCV(this.positionIdToBuffer(takerOrder.takerPositionId)),
       uintCV(takerAmount),
-      bufferCV(Buffer.from(takerSig, "hex")),
       // Order metadata
       uintCV(salt),
       uintCV(expiration),
@@ -184,6 +202,181 @@ export class StacksSettlementService {
 
     throw new Error(
       `Settlement broadcast rejected: ${JSON.stringify(broadcastResult)}`
+    );
+  }
+
+  /**
+   * MINT mode: Both buyers (BUY YES + BUY NO)
+   * Calls: ctf-exchange.fill-order-mint
+   */
+  private async submitFillMint(
+    request: SettlementRequest
+  ): Promise<string | undefined> {
+    if (!this.contractAddress || !this.contractName || !this.operatorKey) {
+      return undefined;
+    }
+
+    const { trade, makerOrder, takerOrder, fillAmount } = request;
+
+    // Calculate payments from both buyers
+    const buyer1Payment = this.ensureInteger(
+      Math.floor((makerOrder.price / 1_000_000) * fillAmount),
+      "buyer 1 payment"
+    );
+    const buyer2Payment = this.ensureInteger(
+      Math.floor((takerOrder.price / 1_000_000) * fillAmount),
+      "buyer 2 payment"
+    );
+
+    const fill = this.ensureInteger(fillAmount, "fill amount");
+    const salt = this.parseUint(makerOrder.salt ?? takerOrder.salt);
+    const expiration = this.parseUint(
+      makerOrder.expiration ?? takerOrder.expiration
+    );
+
+    // Validate signatures
+    if (!makerOrder.signature || !takerOrder.signature) {
+      throw new Error("Both signatures required for MINT mode");
+    }
+
+    const makerSig = makerOrder.signature.replace(/^0x/, "");
+    const takerSig = takerOrder.signature.replace(/^0x/, "");
+
+    if (makerSig.length !== 130 || takerSig.length !== 130) {
+      throw new Error("Signatures must be 65 bytes (130 hex chars)");
+    }
+
+    // Extract condition ID from trade
+    const conditionId = this.positionIdToBuffer(trade.conditionId);
+
+    const functionArgs = [
+      // Buyer 1
+      standardPrincipalCV(makerOrder.maker),
+      bufferCV(this.positionIdToBuffer(makerOrder.takerPositionId)),
+      uintCV(this.ensureInteger(makerOrder.size, "buyer 1 amount")),
+      uintCV(buyer1Payment),
+      bufferCV(Buffer.from(makerSig, "hex")),
+      // Buyer 2
+      standardPrincipalCV(takerOrder.maker),
+      bufferCV(this.positionIdToBuffer(takerOrder.takerPositionId)),
+      uintCV(this.ensureInteger(takerOrder.size, "buyer 2 amount")),
+      uintCV(buyer2Payment),
+      bufferCV(Buffer.from(takerSig, "hex")),
+      // Shared params
+      bufferCV(conditionId),
+      uintCV(salt),
+      uintCV(expiration),
+      uintCV(fill),
+    ];
+
+    const tx = await makeContractCall({
+      contractAddress: this.contractAddress,
+      contractName: this.contractName,
+      functionName: "fill-order-mint",
+      functionArgs,
+      senderKey: this.operatorKey,
+      network: this.network,
+      postConditionMode: PostConditionMode.Deny,
+    });
+
+    const broadcastResult = await broadcastTransaction({
+      transaction: tx,
+      network: this.network,
+    });
+
+    if ("txid" in broadcastResult && !("error" in broadcastResult)) {
+      return broadcastResult.txid;
+    }
+
+    throw new Error(
+      `MINT settlement broadcast rejected: ${JSON.stringify(broadcastResult)}`
+    );
+  }
+
+  /**
+   * MERGE mode: Both sellers (SELL YES + SELL NO)
+   * Calls: ctf-exchange.fill-order-merge
+   */
+  private async submitFillMerge(
+    request: SettlementRequest
+  ): Promise<string | undefined> {
+    if (!this.contractAddress || !this.contractName || !this.operatorKey) {
+      return undefined;
+    }
+
+    const { trade, makerOrder, takerOrder, fillAmount } = request;
+
+    // Calculate payouts to both sellers
+    const seller1Payout = this.ensureInteger(
+      Math.floor((makerOrder.price / 1_000_000) * fillAmount),
+      "seller 1 payout"
+    );
+    const seller2Payout = this.ensureInteger(
+      Math.floor((takerOrder.price / 1_000_000) * fillAmount),
+      "seller 2 payout"
+    );
+
+    const fill = this.ensureInteger(fillAmount, "fill amount");
+    const salt = this.parseUint(makerOrder.salt ?? takerOrder.salt);
+    const expiration = this.parseUint(
+      makerOrder.expiration ?? takerOrder.expiration
+    );
+
+    // Validate signatures
+    if (!makerOrder.signature || !takerOrder.signature) {
+      throw new Error("Both signatures required for MERGE mode");
+    }
+
+    const makerSig = makerOrder.signature.replace(/^0x/, "");
+    const takerSig = takerOrder.signature.replace(/^0x/, "");
+
+    if (makerSig.length !== 130 || takerSig.length !== 130) {
+      throw new Error("Signatures must be 65 bytes (130 hex chars)");
+    }
+
+    const conditionId = this.positionIdToBuffer(trade.conditionId);
+
+    const functionArgs = [
+      // Seller 1
+      standardPrincipalCV(makerOrder.maker),
+      bufferCV(this.positionIdToBuffer(makerOrder.makerPositionId)),
+      uintCV(this.ensureInteger(makerOrder.size, "seller 1 amount")),
+      uintCV(seller1Payout),
+      bufferCV(Buffer.from(makerSig, "hex")),
+      // Seller 2
+      standardPrincipalCV(takerOrder.maker),
+      bufferCV(this.positionIdToBuffer(takerOrder.makerPositionId)),
+      uintCV(this.ensureInteger(takerOrder.size, "seller 2 amount")),
+      uintCV(seller2Payout),
+      bufferCV(Buffer.from(takerSig, "hex")),
+      // Shared params
+      bufferCV(conditionId),
+      uintCV(salt),
+      uintCV(expiration),
+      uintCV(fill),
+    ];
+
+    const tx = await makeContractCall({
+      contractAddress: this.contractAddress,
+      contractName: this.contractName,
+      functionName: "fill-order-merge",
+      functionArgs,
+      senderKey: this.operatorKey,
+      network: this.network,
+      postConditionMode: PostConditionMode.Deny,
+    });
+
+    const broadcastResult = await broadcastTransaction({
+      transaction: tx,
+      network: this.network,
+    });
+
+    if ("txid" in broadcastResult && !("error" in broadcastResult)) {
+      return broadcastResult.txid;
+    }
+
+    throw new Error(
+      `MERGE settlement broadcast rejected: ${JSON.stringify(broadcastResult)}`
     );
   }
 

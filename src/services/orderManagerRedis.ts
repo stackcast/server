@@ -7,6 +7,7 @@ import {
 } from "../types/order";
 import { randomBytes } from "crypto";
 import { redis } from "./redisClient";
+import { DatabasePersistence } from "./databasePersistence";
 
 /**
  * Redis-based Order Manager - Production-grade order storage and indexing
@@ -38,6 +39,8 @@ import { redis } from "./redisClient";
  * 3. fillOrder() → acquires lock, updates filledSize, removes if filled
  */
 export class OrderManagerRedis {
+  constructor(private readonly persistence?: DatabasePersistence) {}
+
   // ========== ORDER MANAGEMENT ==========
 
   /**
@@ -78,50 +81,39 @@ export class OrderManagerRedis {
       updatedAt: now,
     };
 
-    // Redis multi = all commands execute atomically (all succeed or all fail)
-    const multi = redis.multi();
-
-    // Convert order to flat object for HSET
-    const orderHash: Record<string, string> = {};
-    for (const [key, value] of Object.entries(fullOrder)) {
-      orderHash[key] = String(value);
-    }
-
-    // 1. Store complete order as hash (key-value pairs)
-    multi.hSet(`order:${orderId}`, orderHash);
-
-    // 2. Index by market (enables getMarketOrders query)
-    multi.sAdd(`market:${order.marketId}:orders`, orderId);
-
-    // 3. Index by user (enables getUserOrders query)
-    multi.sAdd(`user:${order.maker}:orders`, orderId);
-
-    // 4. Add to price-sorted orderbook (enables matching engine to find best prices)
-    // Sorted set score = price, enables O(log N) range queries
-    const bookPositionId = this.getBookPositionId(
-      order.side,
-      order.makerPositionId,
-      order.takerPositionId
-    );
-    const bookKey = this.buildOrderbookKey(
-      order.marketId,
-      bookPositionId,
-      order.side
-    );
-
-    // Both buy and sell stored with score=price
-    multi.zAdd(bookKey, { score: order.price, value: orderId });
-
-    // Execute all 4 commands atomically
-    await multi.exec();
+    await this.writeOrderToRedis(fullOrder);
 
     console.log(
       `📝 New order: ${orderId} - ${order.side} ${order.size} @ ${order.price}`
     );
 
-    await this.clearOrderbookCache(order.marketId, bookPositionId);
+    await this.persistOrder(fullOrder);
 
     return fullOrder;
+  }
+
+  /**
+   * Link original order with its complementary mirror order so that fills/cancels
+   * update both records consistently.
+   */
+  async linkComplementaryOrders(
+    originalOrderId: string,
+    complementaryOrderId: string
+  ): Promise<void> {
+    const originalOrder = await this.getOrder(originalOrderId);
+    if (!originalOrder) {
+      return;
+    }
+
+    if (originalOrder.complementaryOrderId === complementaryOrderId) {
+      return;
+    }
+
+    originalOrder.complementaryOrderId = complementaryOrderId;
+    originalOrder.updatedAt = Date.now();
+
+    await this.writeOrderToRedis(originalOrder);
+    await this.persistOrder(originalOrder);
   }
 
   async getOrder(orderId: string): Promise<Order | null> {
@@ -182,6 +174,24 @@ export class OrderManagerRedis {
    *   Match B: acquires lock, tries to fill 60 but only 40 remaining, fills 40, releases lock
    */
   async fillOrder(orderId: string, fillSize: number): Promise<boolean> {
+    // Get the order to check if it has a complementary order
+    const order = await this.getOrder(orderId);
+    if (!order) {
+      return false;
+    }
+
+    // Fill the original order
+    const result = await this.fillOrderInternal(orderId, fillSize);
+
+    // Also fill the complementary order if it exists
+    if (order.complementaryOrderId) {
+      await this.fillOrderInternal(order.complementaryOrderId, fillSize);
+    }
+
+    return result;
+  }
+
+  private async fillOrderInternal(orderId: string, fillSize: number): Promise<boolean> {
     if (fillSize <= 0) {
       return false;
     }
@@ -233,11 +243,13 @@ export class OrderManagerRedis {
 
       const multi = redis.multi();
 
+      const updatedAt = Date.now();
+
       multi.hSet(orderKey, {
         filledSize: newFilledSize.toString(),
         remainingSize: newRemainingSize.toString(),
         status: newStatus.toString(),
-        updatedAt: Date.now().toString(),
+        updatedAt: updatedAt.toString(),
       });
 
       if (newRemainingSize <= 0) {
@@ -247,6 +259,13 @@ export class OrderManagerRedis {
       await multi.exec();
 
       await this.clearOrderbookCache(order.marketId, bookPositionId);
+
+      order.filledSize = newFilledSize;
+      order.remainingSize = newRemainingSize;
+      order.status = newStatus;
+      order.updatedAt = updatedAt;
+
+      await this.persistOrder(order);
 
       if (newRemainingSize <= 0) {
         console.log(`✅ Order filled: ${orderId}`);
@@ -273,12 +292,30 @@ export class OrderManagerRedis {
       return false;
     }
 
+    // Cancel the original order
+    const result = await this.cancelOrderInternal(orderId, order);
+
+    // Also cancel the complementary order if it exists
+    if (order.complementaryOrderId && !order.isComplementary) {
+      const complementaryOrder = await this.getOrder(order.complementaryOrderId);
+      if (complementaryOrder) {
+        await this.cancelOrderInternal(order.complementaryOrderId, complementaryOrder);
+      }
+    }
+
+    return result;
+  }
+
+  private async cancelOrderInternal(orderId: string, order: Order): Promise<boolean> {
+
     const multi = redis.multi();
 
     // Update status
+    const updatedAt = Date.now();
+
     multi.hSet(`order:${orderId}`, {
       status: OrderStatus.CANCELLED.toString(),
-      updatedAt: Date.now().toString(),
+      updatedAt: updatedAt.toString(),
     });
 
     // Remove from orderbook
@@ -297,6 +334,11 @@ export class OrderManagerRedis {
     await multi.exec();
 
     await this.clearOrderbookCache(order.marketId, bookPositionId);
+
+    order.status = OrderStatus.CANCELLED;
+    order.updatedAt = updatedAt;
+
+    await this.persistOrder(order);
 
     console.log(`❌ Order cancelled: ${orderId}`);
     return true;
@@ -316,10 +358,12 @@ export class OrderManagerRedis {
 
     const multi = redis.multi();
 
+    const updatedAt = Date.now();
+
     // Update status
     multi.hSet(`order:${orderId}`, {
       status: OrderStatus.EXPIRED.toString(),
-      updatedAt: Date.now().toString(),
+      updatedAt: updatedAt.toString(),
     });
 
     // Remove from orderbook
@@ -339,6 +383,11 @@ export class OrderManagerRedis {
 
     await this.clearOrderbookCache(order.marketId, bookPositionId);
 
+    order.status = OrderStatus.EXPIRED;
+    order.updatedAt = updatedAt;
+
+    await this.persistOrder(order);
+
     console.log(`⏰ Order expired: ${orderId}`);
     return true;
   }
@@ -348,8 +397,11 @@ export class OrderManagerRedis {
   /**
    * Get orderbook snapshot - aggregates orders by price level
    *
+   * Used by: /api/orderbook endpoint (user-facing API for frontend)
+   * NOT used by: matching engine (it calculates bestBid/bestAsk from sorted orders directly)
+   *
    * Performance optimization:
-   * - 10-second cache reduces load (orderbooks don't change that fast)
+   * - 10-second cache reduces API response time (orderbooks don't change every second)
    * - Sorted sets pre-sorted by price (O(log N) range query)
    * - Aggregation happens in-memory (sum sizes at same price)
    *
@@ -370,7 +422,7 @@ export class OrderManagerRedis {
     marketId: string,
     positionId: string
   ): Promise<{ bids: OrderbookLevel[]; asks: OrderbookLevel[] }> {
-    // Check 10s cache first (orderbook doesn't change every millisecond)
+    // Check 10s cache first (helps API performance when frontend polls frequently)
     const cacheKey = `orderbook:${marketId}:${positionId}:cache`;
     const cached = await redis.get(cacheKey);
 
@@ -449,21 +501,8 @@ export class OrderManagerRedis {
   // ========== MARKET MANAGEMENT ==========
 
   async addMarket(market: Market): Promise<void> {
-    const multi = redis.multi();
-
-    // Convert market to flat object for HSET
-    const marketHash: Record<string, string> = {};
-    for (const [key, value] of Object.entries(market)) {
-      marketHash[key] = String(value);
-    }
-
-    // Store market as hash
-    multi.hSet(`market:${market.marketId}`, marketHash);
-
-    // Add to markets set
-    multi.sAdd("markets", market.marketId);
-
-    await multi.exec();
+    await this.writeMarketToRedis(market);
+    await this.persistMarket(market);
 
     console.log(`📊 New market: ${market.marketId} - "${market.question}"`);
   }
@@ -548,7 +587,131 @@ export class OrderManagerRedis {
     return count;
   }
 
+  async updateMarketPrices(
+    marketId: string,
+    yesPrice: number,
+    noPrice: number
+  ): Promise<void> {
+    const exists = await redis.exists(`market:${marketId}`);
+    if (!exists) {
+      return;
+    }
+
+    await redis.hSet(`market:${marketId}`, {
+      yesPrice: yesPrice.toString(),
+      noPrice: noPrice.toString(),
+    });
+
+    await this.persistenceSafeCall(async () => {
+      await this.persistence?.updateMarketPrices(marketId, yesPrice, noPrice);
+    }, "updateMarketPrices");
+  }
+
   // ========== HELPERS ==========
+
+  async restoreFromPersistence(): Promise<void> {
+    if (!this.persistence) {
+      return;
+    }
+
+    await this.persistenceSafeCall(async () => {
+      const markets = await this.persistence!.getAllMarkets();
+      for (const market of markets) {
+        await this.writeMarketToRedis(market);
+      }
+
+      const orders = await this.persistence!.getAllOrders();
+      for (const order of orders) {
+        await this.writeOrderToRedis(order);
+      }
+
+      if (markets.length > 0 || orders.length > 0) {
+        console.log(
+          `💾 Restored ${markets.length} markets and ${orders.length} orders from Postgres`
+        );
+      }
+    }, "restoreFromPersistence");
+  }
+
+  private async writeOrderToRedis(order: Order): Promise<void> {
+    const multi = redis.multi();
+    const orderHash: Record<string, string> = {};
+
+    for (const [key, value] of Object.entries(order)) {
+      if (value !== undefined) {
+        orderHash[key] = String(value);
+      }
+    }
+
+    multi.hSet(`order:${order.orderId}`, orderHash);
+    multi.sAdd(`market:${order.marketId}:orders`, order.orderId);
+    multi.sAdd(`user:${order.maker}:orders`, order.orderId);
+
+    const bookPositionId = this.getBookPositionId(
+      order.side,
+      order.makerPositionId,
+      order.takerPositionId
+    );
+    const bookKey = this.buildOrderbookKey(
+      order.marketId,
+      bookPositionId,
+      order.side
+    );
+
+    if (this.orderRestingInBook(order.status)) {
+      multi.zAdd(bookKey, { score: order.price, value: order.orderId });
+    } else {
+      multi.zRem(bookKey, order.orderId);
+    }
+
+    await multi.exec();
+
+    await this.clearOrderbookCache(order.marketId, bookPositionId);
+  }
+
+  private orderRestingInBook(status: OrderStatus): boolean {
+    return (
+      status === OrderStatus.OPEN || status === OrderStatus.PARTIALLY_FILLED
+    );
+  }
+
+  private async writeMarketToRedis(market: Market): Promise<void> {
+    const multi = redis.multi();
+    const marketHash: Record<string, string> = {};
+
+    for (const [key, value] of Object.entries(market)) {
+      if (value !== undefined) {
+        marketHash[key] = String(value);
+      }
+    }
+
+    multi.hSet(`market:${market.marketId}`, marketHash);
+    multi.sAdd("markets", market.marketId);
+    await multi.exec();
+  }
+
+  private async persistOrder(order: Order): Promise<void> {
+    await this.persistenceSafeCall(async () => {
+      await this.persistence?.upsertOrder(order);
+    }, "upsertOrder");
+  }
+
+  private async persistMarket(market: Market): Promise<void> {
+    await this.persistenceSafeCall(async () => {
+      await this.persistence?.upsertMarket(market);
+    }, "upsertMarket");
+  }
+
+  private async persistenceSafeCall(
+    action: () => Promise<void>,
+    context: string
+  ): Promise<void> {
+    try {
+      await action();
+    } catch (error) {
+      console.error(`⚠️  Postgres persistence error (${context}):`, error);
+    }
+  }
 
   private generateOrderId(): string {
     return `order_${Date.now()}_${randomBytes(8).toString("hex")}`;
@@ -574,6 +737,11 @@ export class OrderManagerRedis {
       updatedAt: parseInt(data.updatedAt),
       signature: data.signature,
       publicKey: data.publicKey,
+      complementaryOrderId: data.complementaryOrderId || undefined,
+      isComplementary:
+        data.isComplementary !== undefined
+          ? data.isComplementary === "true"
+          : false,
     };
   }
 }

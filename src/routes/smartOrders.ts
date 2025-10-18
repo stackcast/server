@@ -1,9 +1,55 @@
 import express, { type Request, type Response } from "express";
 import { ExecutionPlan, SmartRouter } from "../services/smartRouter";
-import { OrderSide, OrderType } from "../types/order";
+import { OrderSide, OrderType, type Market } from "../types/order";
 import { verifyOrderSignatureMiddleware } from "../utils/signatureVerification";
 
 export const smartOrderRoutes = express.Router();
+
+/**
+ * Resolve position IDs for order based on side and outcome
+ *
+ * Semantics:
+ * - BUY YES: maker gives sBTC (represented as payment), receives YES tokens
+ * - BUY NO: maker gives sBTC (represented as payment), receives NO tokens
+ * - SELL YES: maker gives YES tokens, receives sBTC
+ * - SELL NO: maker gives NO tokens, receives sBTC
+ *
+ * Position IDs identify which outcome token is being traded:
+ * - makerPositionId: what maker is giving
+ * - takerPositionId: what maker receives
+ */
+function resolvePositionIds(
+  market: Market,
+  side: OrderSide,
+  outcome: "yes" | "no"
+): {
+  makerPositionId: string;
+  takerPositionId: string;
+  requiredPositionId: string;
+} {
+  const yesPositionId = market.yesPositionId;
+  const noPositionId = market.noPositionId;
+  const targetPositionId = outcome === "yes" ? yesPositionId : noPositionId;
+  const oppositePositionId = outcome === "yes" ? noPositionId : yesPositionId;
+
+  if (side === OrderSide.BUY) {
+    // BUY: maker pays sBTC, receives outcome tokens
+    // makerPositionId = opposite outcome (used as collateral/payment representation)
+    // takerPositionId = target outcome (what buyer receives)
+    return {
+      makerPositionId: oppositePositionId,
+      takerPositionId: targetPositionId,
+      requiredPositionId: oppositePositionId, // Buyer needs opposite tokens as collateral
+    };
+  }
+
+  // SELL: maker gives outcome tokens, receives sBTC
+  return {
+    makerPositionId: targetPositionId,
+    takerPositionId: oppositePositionId, // What seller receives (sBTC represented as opposite outcome)
+    requiredPositionId: targetPositionId, // Seller must own the tokens they're selling
+  };
+}
 
 /**
  * POST /api/smart-orders/preview - Preview order execution (no placement)
@@ -88,6 +134,12 @@ smartOrderRoutes.post("/preview", async (req: Request, res: Response) => {
       return res.status(400).json({
         success: false,
         error: "Size must be greater than 0",
+      });
+    }
+    if (!Number.isInteger(numericSize)) {
+      return res.status(400).json({
+        success: false,
+        error: "Size must be an integer number of outcome tokens",
       });
     }
 
@@ -252,6 +304,12 @@ smartOrderRoutes.post("/", async (req: Request, res: Response) => {
         error: "Size must be greater than 0",
       });
     }
+    if (!Number.isInteger(numericSize)) {
+      return res.status(400).json({
+        success: false,
+        error: "Size must be an integer number of outcome tokens",
+      });
+    }
 
     // Get market data
     const market = await orderManager.getMarket(marketId);
@@ -262,24 +320,11 @@ smartOrderRoutes.post("/", async (req: Request, res: Response) => {
       });
     }
 
-    // Determine position IDs based on side and outcome
-    let makerPositionId: string;
-    let takerPositionId: string;
-
-    if (side === OrderSide.BUY) {
-      // BUY: maker gives opposite token, gets desired token
-      makerPositionId =
-        outcome === "yes" ? market.noPositionId : market.yesPositionId;
-      takerPositionId =
-        outcome === "yes" ? market.yesPositionId : market.noPositionId;
-    } else {
-      // SELL: maker gives desired token, gets opposite token
-      makerPositionId =
-        outcome === "yes" ? market.yesPositionId : market.noPositionId;
-      takerPositionId =
-        outcome === "yes" ? market.noPositionId : market.yesPositionId;
-    }
-
+    const { makerPositionId, takerPositionId } = resolvePositionIds(
+      market,
+      side,
+      outcome
+    );
 
     // MARKET ORDER: Multi-level execution
     if (orderType === OrderType.MARKET) {
@@ -313,11 +358,12 @@ smartOrderRoutes.post("/", async (req: Request, res: Response) => {
       // Verify signature once for the market order (not per level)
       // We verify the original order parameters that were signed
       const totalMakerAmount = numericSize;
-      const estimatedTotalTakerAmount = Math.floor(plan.averagePrice * numericSize);
+      const estimatedTotalTakerAmount = Math.floor(
+        plan.averagePrice * numericSize
+      );
 
       const verificationResult = await verifyOrderSignatureMiddleware({
         maker,
-        taker: maker,
         makerPositionId,
         takerPositionId,
         makerAmount: totalMakerAmount,
@@ -335,25 +381,22 @@ smartOrderRoutes.post("/", async (req: Request, res: Response) => {
         });
       }
 
-      // Place orders at each execution level (no per-level signature check needed)
-      // IMPORTANT: Market orders must TAKE liquidity (opposite side) not provide it
-      // If user wants to BUY, we place SELL orders to match against existing buyers
-      // If user wants to SELL, we place BUY orders to match against existing sellers
-      const oppositeSide = side === OrderSide.BUY ? OrderSide.SELL : OrderSide.BUY;
-
+      // Place orders at each execution level
+      // Market orders are aggressive takers that match against resting liquidity
+      // We place limit orders at each level that will match immediately
       const orders = [];
       for (const level of plan.levels) {
         const levelSalt = `${salt || Date.now()}_level_${level.price}`;
         const levelExpiration = expiration || 999999999;
 
-        // Add order to orderbook with OPPOSITE side to ensure matching
+        // Place order with SAME side as user intent - matching engine will match it
         const order = await orderManager.addOrder({
           maker,
           marketId: market.marketId,
           conditionId: market.conditionId,
           makerPositionId,
           takerPositionId,
-          side: oppositeSide,
+          side, // Use SAME side as user requested
           price: level.price,
           size: level.size,
           salt: levelSalt,
@@ -425,10 +468,8 @@ smartOrderRoutes.post("/", async (req: Request, res: Response) => {
     const makerAmount = numericSize;
     const takerAmount = numericSize * numericPrice;
 
-
     const verificationResult = await verifyOrderSignatureMiddleware({
       maker,
-      taker: maker,
       makerPositionId,
       takerPositionId,
       makerAmount,
@@ -511,16 +552,8 @@ smartOrderRoutes.post("/requirements", async (req: Request, res: Response) => {
       });
     }
 
-    // Determine which position ID the maker needs
-    let requiredPositionId: string;
-
-    if (side === OrderSide.BUY) {
-      requiredPositionId =
-        outcome === "yes" ? market.noPositionId : market.yesPositionId;
-    } else {
-      requiredPositionId =
-        outcome === "yes" ? market.yesPositionId : market.noPositionId;
-    }
+    const { makerPositionId, takerPositionId, requiredPositionId } =
+      resolvePositionIds(market, side, outcome);
 
     return res.json({
       success: true,
@@ -529,6 +562,8 @@ smartOrderRoutes.post("/requirements", async (req: Request, res: Response) => {
         conditionId: market.conditionId,
         requiredPositionId,
         requiredAmount: parseFloat(size),
+        makerPositionId,
+        takerPositionId,
         action:
           side === OrderSide.BUY
             ? `Buying ${outcome.toUpperCase()}`

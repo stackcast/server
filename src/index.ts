@@ -54,10 +54,14 @@ import { marketRoutes } from './routes/markets';
 import { orderbookRoutes } from './routes/orderbook';
 import { oracleRoutes } from './routes/oracle';
 import { smartOrderRoutes } from './routes/smartOrders';
+import { stacksRoutes } from './routes/stacks';
 import { MatchingEngine } from './services/matchingEngine';
 import { OrderManagerRedis } from './services/orderManagerRedis';
 import { StacksMonitor } from './services/stacksMonitor';
 import { StacksSettlementService } from './services/stacksSettlement';
+import { db } from './db/client';
+import { DatabasePersistence } from './services/databasePersistence';
+import { adminRoutes } from './routes/admin';
 
 dotenv.config();
 
@@ -69,59 +73,79 @@ app.use(cors());
 app.use(express.json());
 
 // Initialize core services
-const networkType = (process.env.STACKS_NETWORK as 'mainnet' | 'testnet' | 'devnet') || 'testnet';
+const networkType =
+  (process.env.STACKS_NETWORK as 'mainnet' | 'testnet' | 'devnet') || 'testnet';
 
-// 1. Order storage and indexing (Redis)
-const orderManager = new OrderManagerRedis();
+let orderManager: OrderManagerRedis;
+let settlementService: StacksSettlementService;
+let matchingEngine: MatchingEngine;
+let stacksMonitor: StacksMonitor;
 
-// 2. On-chain settlement (optional, skips if env vars missing)
-const settlementService = new StacksSettlementService({
-  network: networkType,
-  contractIdentifier: process.env.CTF_EXCHANGE_ADDRESS,
-  operatorPrivateKey: process.env.STACKS_OPERATOR_PRIVATE_KEY,
-  apiUrl: process.env.STACKS_API_URL,
-});
+async function bootstrap(): Promise<void> {
+  const persistence = new DatabasePersistence(db);
+  await persistence.init();
 
-// 3. Continuous order matching (100ms loop)
-const matchingEngine = new MatchingEngine(orderManager, settlementService);
+  // 1. Order storage and indexing (Redis + Postgres persistence)
+  orderManager = new OrderManagerRedis(persistence);
+  await orderManager.restoreFromPersistence();
 
-// 4. Blockchain monitoring for order expiration (30s loop)
-const stacksMonitor = new StacksMonitor(orderManager, networkType);
-
-// Start background services
-matchingEngine.start();
-stacksMonitor.start();
-
-// Attach services to request
-app.use((req, _res, next) => {
-  req.orderManager = orderManager;
-  req.matchingEngine = matchingEngine;
-  next();
-});
-
-// Routes
-app.use('/api/markets', marketRoutes);
-app.use('/api/smart-orders', smartOrderRoutes);
-app.use('/api/orderbook', orderbookRoutes);
-app.use('/api/oracle', oracleRoutes);
-
-// Health check
-app.get('/health', async (_req, res) => {
-  const orderCount = await orderManager.getOrderCount();
-  res.json({
-    status: 'ok',
-    timestamp: new Date().toISOString(),
-    orderCount,
-    matchingEngineRunning: matchingEngine.isRunning(),
-    stacksMonitorRunning: stacksMonitor.isRunning(),
-    currentBlockHeight: stacksMonitor.getCurrentBlockHeight()
+  // 2. On-chain settlement (optional, skips if env vars missing)
+  settlementService = new StacksSettlementService({
+    network: networkType,
+    contractIdentifier: process.env.CTF_EXCHANGE_ADDRESS,
+    operatorPrivateKey: process.env.STACKS_OPERATOR_PRIVATE_KEY,
+    apiUrl: process.env.STACKS_API_URL,
   });
-});
 
-app.listen(PORT, () => {
-  console.log(`🚀 Stackcast CLOB API running on port ${PORT}`);
-  console.log(`📊 Matching engine started`);
-  console.log(`⛓️  Stacks monitor started`);
+  // 3. Continuous order matching (100ms loop)
+  matchingEngine = new MatchingEngine(orderManager, settlementService);
+
+  // 4. Blockchain monitoring for order expiration (30s loop)
+  stacksMonitor = new StacksMonitor(orderManager, networkType);
+
+  // Start background services
+  matchingEngine.start();
+  stacksMonitor.start();
+
+  // Attach services to request
+  app.use((req, _res, next) => {
+    req.orderManager = orderManager;
+    req.matchingEngine = matchingEngine;
+    req.settlementService = settlementService;
+    next();
+  });
+
+  // Routes
+  app.use('/api/markets', marketRoutes);
+  app.use('/api/smart-orders', smartOrderRoutes);
+  app.use('/api/orderbook', orderbookRoutes);
+  app.use('/api/oracle', oracleRoutes);
+  app.use('/api/stacks', stacksRoutes);
+  app.use('/api/admin', adminRoutes);
+
+  // Health check
+  app.get('/health', async (_req, res) => {
+    const orderCount = await orderManager.getOrderCount();
+    res.json({
+      status: 'ok',
+      timestamp: new Date().toISOString(),
+      orderCount,
+      matchingEngineRunning: matchingEngine.isRunning(),
+      stacksMonitorRunning: stacksMonitor.isRunning(),
+      currentBlockHeight: stacksMonitor.getCurrentBlockHeight(),
+    });
+  });
+
+  app.listen(PORT, () => {
+    console.log(`🚀 Stackcast CLOB API running on port ${PORT}`);
+    console.log(`📊 Matching engine started`);
+    console.log(`⛓️  Stacks monitor started`);
+  });
+}
+
+bootstrap().catch((error) => {
+  console.error('❌ Failed to bootstrap Stackcast server:', error);
+  process.exit(1);
 });
 
 export { orderManager, matchingEngine, stacksMonitor, settlementService };

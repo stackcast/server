@@ -30,10 +30,10 @@ export enum OrderStatus {
 // 3. Matching engine pairs BUY/SELL orders (buy price >= sell price)
 // 4. Settlement service submits matched trades to ctf-exchange.clar
 //
-// Example: BUY 100 YES @ 66¢
-//   - Maker provides: 100 NO tokens (worth 34¢ each = 3400¢)
-//   - Maker receives: 100 YES tokens (worth 66¢ each = 6600¢)
-//   - Price represents probability: 66% chance YES wins
+// Example: BUY 100 YES @ 0.66 sBTC
+//   - Maker provides: 100 NO tokens (worth 0.34 sBTC each)
+//   - Maker receives: 100 YES tokens (worth 0.66 sBTC each)
+//   - Price stored as integer micro-sats (0.66 sBTC → 660_000)
 export interface Order {
   orderId: string;          // Unique: "order_{timestamp}_{random16}"
   maker: string;            // Stacks principal (e.g., SP2ABC...)
@@ -42,7 +42,7 @@ export interface Order {
   makerPositionId: string;  // What maker gives (32-byte hex: YES or NO token)
   takerPositionId: string;  // What maker gets (32-byte hex: YES or NO token)
   side: OrderSide;          // BUY or SELL from maker's perspective
-  price: number;            // Cents: 0-100 (e.g., 66 = $0.66 = 66% probability)
+  price: number;            // Price in micro-satoshis per token (1 sBTC = 1_000_000)
   size: number;             // Token amount (e.g., 100 tokens)
   filledSize: number;       // Amount matched so far
   remainingSize: number;    // size - filledSize
@@ -53,6 +53,8 @@ export interface Order {
   updatedAt: number;        // Unix ms timestamp (updated on fills)
   signature?: string;       // 65-byte ECDSA sig (130 hex chars)
   publicKey?: string;       // Compressed public key for signature verification
+  complementaryOrderId?: string; // ID of the inverted order (for unified orderbook)
+  isComplementary?: boolean;     // True if this is an auto-generated inverted order
 }
 
 // Aggregated orderbook price level showing total liquidity
@@ -99,8 +101,8 @@ export interface Trade {
 
 // Prediction market metadata and current pricing
 //
-// YES + NO prices always sum to 100 (complementary probabilities)
-// Example: yesPrice=66, noPrice=34 → market thinks 66% chance YES wins
+// YES + NO prices always sum to 1_000_000 micro-satoshis (complementary probabilities)
+// Example: yesPrice=660_000, noPrice=340_000 → market implies 66% chance YES wins
 export interface Market {
   marketId: string;
   conditionId: string;      // Links to conditional-tokens.clar
@@ -108,8 +110,8 @@ export interface Market {
   creator: string;          // Market creator's Stacks principal
   yesPositionId: string;    // 32-byte hex token ID for YES outcome
   noPositionId: string;     // 32-byte hex token ID for NO outcome
-  yesPrice: number;         // Current YES price (cents, 0-100)
-  noPrice: number;          // Current NO price = 100 - yesPrice
+  yesPrice: number;         // Current YES price in micro-satoshis (0 - 1_000_000)
+  noPrice: number;          // Current NO price = 1_000_000 - yesPrice
   volume24h: number;        // 24h trading volume
   createdAt: number;        // Unix ms timestamp
   resolved: boolean;        // True after oracle resolves condition

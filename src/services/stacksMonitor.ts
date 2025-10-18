@@ -1,5 +1,5 @@
 import type { StacksNetwork } from '@stacks/network';
-import { STACKS_DEVNET, STACKS_TESTNET, STACKS_MAINNET } from '@stacks/network';
+import { createNetwork } from '@stacks/network';
 import { OrderStatus } from "../types/order";
 import { OrderManagerRedis } from "./orderManagerRedis";
 
@@ -21,19 +21,14 @@ export class StacksMonitor {
   ) {
     this.orderManager = orderManager;
 
-    // Initialize network based on environment
-    switch (networkType) {
-      case "mainnet":
-        this.network = STACKS_MAINNET;
-        break;
-      case "devnet":
-        this.network = STACKS_DEVNET;
-        break;
-      case "testnet":
-      default:
-        this.network = STACKS_TESTNET;
-        break;
-    }
+    // Initialize network with custom API URL if provided
+    const apiUrl = process.env.STACKS_API_URL;
+    this.network = apiUrl
+      ? createNetwork({
+          network: networkType,
+          client: { baseUrl: apiUrl },
+        })
+      : createNetwork(networkType);
   }
 
   /**
