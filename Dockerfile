@@ -23,7 +23,7 @@ COPY . .
 
 # --- SECURITY HARDENING START ---
 # Create and use a non-root user inside container
-RUN adduser -D appuser
+RUN adduser --disabled-password --gecos '' appuser
 USER appuser
 # --- SECURITY HARDENING END ---
 
