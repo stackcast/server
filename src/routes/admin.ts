@@ -88,3 +88,23 @@ adminRoutes.post(
     }
   }
 );
+
+adminRoutes.post("/restore-from-db", async (req: Request, res: Response) => {
+  try {
+    await req.orderManager.restoreFromPersistence();
+
+    const markets = await req.orderManager.getAllMarkets();
+
+    return res.json({
+      success: true,
+      message: "Successfully restored data from Postgres to Redis",
+      marketsRestored: markets.length,
+    });
+  } catch (error) {
+    console.error("Admin restore error:", error);
+    return res.status(500).json({
+      success: false,
+      error: error instanceof Error ? error.message : "Unknown error",
+    });
+  }
+});
