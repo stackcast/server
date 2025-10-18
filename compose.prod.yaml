@@ -26,10 +26,6 @@ services:
       - "3000:3000"
     env_file:
       - .env.prod
-    environment:
-      - NODE_ENV=production
-      - PORT=3000
-      - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
     depends_on:
       redis:
         condition: service_healthy
