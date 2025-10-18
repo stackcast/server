@@ -218,21 +218,39 @@ export class StacksSettlementService {
 
     const { trade, makerOrder, takerOrder, fillAmount } = request;
 
-    // Calculate payments from both buyers
-    const buyer1Payment = this.ensureInteger(
-      Math.floor((makerOrder.price / 1_000_000) * fillAmount),
-      "buyer 1 payment"
-    );
-    const buyer2Payment = this.ensureInteger(
-      Math.floor((takerOrder.price / 1_000_000) * fillAmount),
-      "buyer 2 payment"
-    );
-
     const fill = this.ensureInteger(fillAmount, "fill amount");
-    const salt = this.parseUint(makerOrder.salt ?? takerOrder.salt);
-    const expiration = this.parseUint(
-      makerOrder.expiration ?? takerOrder.expiration
-    );
+
+    const priceScale = 1_000_000n;
+    const feeBps = 50n;
+    const feeDenominator = 10_000n;
+
+    const makerPrice = this.ensureInteger(makerOrder.price, "maker price");
+    const takerPrice = this.ensureInteger(takerOrder.price, "taker price");
+
+    const fee = (fill * feeBps) / feeDenominator;
+    const buyer1Base = (makerPrice * fill) / priceScale;
+    const buyer2Base = (takerPrice * fill) / priceScale;
+    const buyer1Payment = buyer1Base + fee;
+    const buyer2Payment = buyer2Base;
+
+    if (buyer1Payment <= 0n || buyer2Payment <= 0n) {
+      throw new Error("Mint payments must be positive");
+    }
+
+    const totalPayment = buyer1Payment + buyer2Payment;
+    const requiredPayment = fill + fee;
+
+    if (totalPayment < requiredPayment) {
+      throw new Error(
+        `Mint payments too small: total=${totalPayment} required=${requiredPayment}`
+      );
+    }
+    const overage = totalPayment - requiredPayment;
+    if (overage > 1n) {
+      throw new Error(
+        `Mint payments mismatch (overage ${overage.toString()} > 1)`
+      );
+    }
 
     // Validate signatures
     if (!makerOrder.signature || !takerOrder.signature) {
@@ -246,26 +264,48 @@ export class StacksSettlementService {
       throw new Error("Signatures must be 65 bytes (130 hex chars)");
     }
 
-    // Extract condition ID from trade
     const conditionId = this.positionIdToBuffer(trade.conditionId);
+    const makerMakerPositionId = this.positionIdToBuffer(
+      makerOrder.makerPositionId
+    );
+    const makerTakerPositionId = this.positionIdToBuffer(
+      makerOrder.takerPositionId
+    );
+    const takerMakerPositionId = this.positionIdToBuffer(
+      takerOrder.makerPositionId
+    );
+    const takerTakerPositionId = this.positionIdToBuffer(
+      takerOrder.takerPositionId
+    );
+
+    const makerAmount = this.ensureInteger(makerOrder.size, "buyer 1 amount");
+    const takerAmount = this.ensureInteger(takerOrder.size, "buyer 2 amount");
+    const makerSalt = this.parseUint(makerOrder.salt ?? 0);
+    const takerSalt = this.parseUint(takerOrder.salt ?? 0);
+    const makerExpiration = this.parseUint(makerOrder.expiration ?? 0);
+    const takerExpiration = this.parseUint(takerOrder.expiration ?? 0);
 
     const functionArgs = [
-      // Buyer 1
+      // Buyer 1 (resting order)
       standardPrincipalCV(makerOrder.maker),
-      bufferCV(this.positionIdToBuffer(makerOrder.takerPositionId)),
-      uintCV(this.ensureInteger(makerOrder.size, "buyer 1 amount")),
+      bufferCV(makerMakerPositionId),
+      bufferCV(makerTakerPositionId),
+      uintCV(makerAmount),
       uintCV(buyer1Payment),
+      uintCV(makerSalt),
+      uintCV(makerExpiration),
       bufferCV(Buffer.from(makerSig, "hex")),
-      // Buyer 2
+      // Buyer 2 (incoming order)
       standardPrincipalCV(takerOrder.maker),
-      bufferCV(this.positionIdToBuffer(takerOrder.takerPositionId)),
-      uintCV(this.ensureInteger(takerOrder.size, "buyer 2 amount")),
+      bufferCV(takerMakerPositionId),
+      bufferCV(takerTakerPositionId),
+      uintCV(takerAmount),
       uintCV(buyer2Payment),
+      uintCV(takerSalt),
+      uintCV(takerExpiration),
       bufferCV(Buffer.from(takerSig, "hex")),
       // Shared params
       bufferCV(conditionId),
-      uintCV(salt),
-      uintCV(expiration),
       uintCV(fill),
     ];
 

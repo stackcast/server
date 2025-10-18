@@ -179,15 +179,22 @@ export class MatchingEngine {
       // Execute at maker's price (sell order arrived first, gets their price)
       const matchPrice = sellOrder.price;
 
-      // Detect trade type: MINT (both BUY), MERGE (both SELL), or NORMAL (BUY+SELL)
       let tradeType = TradeType.NORMAL;
-      if (this.detectComplementaryTrade(buyOrder, sellOrder)) {
-        // Both are BUY → MINT
-        if (buyOrder.side === OrderSide.BUY && sellOrder.side === OrderSide.BUY) {
+      let settlementMaker = sellOrder;
+      let settlementTaker = buyOrder;
+
+      if (sellOrder.isComplementary && sellOrder.complementaryOrderId) {
+        const original = await this.orderManager.getOrder(sellOrder.complementaryOrderId);
+        if (original) {
+          settlementMaker = original;
           tradeType = TradeType.MINT;
         }
-        // Both are SELL → MERGE
-        else if (buyOrder.side === OrderSide.SELL && sellOrder.side === OrderSide.SELL) {
+      }
+
+      if (buyOrder.isComplementary && buyOrder.complementaryOrderId) {
+        const original = await this.orderManager.getOrder(buyOrder.complementaryOrderId);
+        if (original) {
+          settlementTaker = original;
           tradeType = TradeType.MERGE;
         }
       }
@@ -195,11 +202,11 @@ export class MatchingEngine {
       // Create trade
       const trade = this.createTrade({
         marketId: market.marketId,
-        conditionId: buyOrder.conditionId,
-        makerPositionId: sellOrder.makerPositionId,
-        takerPositionId: sellOrder.takerPositionId,
-        maker: sellOrder.maker,
-        taker: buyOrder.maker,
+        conditionId: settlementTaker.conditionId,
+        makerPositionId: settlementMaker.makerPositionId,
+        takerPositionId: settlementTaker.takerPositionId,
+        maker: settlementMaker.maker,
+        taker: settlementTaker.maker,
         price: matchPrice,
         size: matchSize,
         side: OrderSide.BUY, // Taker's side
@@ -229,8 +236,8 @@ export class MatchingEngine {
         try {
           const txId = await this.settlementService.submitFill({
             trade,
-            makerOrder: sellOrder,
-            takerOrder: buyOrder,
+            makerOrder: settlementMaker,
+            takerOrder: settlementTaker,
             fillAmount: matchSize,
             executionPrice: matchPrice,
           });
@@ -377,25 +384,4 @@ export class MatchingEngine {
    *    - Buyer sends sBTC to seller
    *    - Seller sends outcome tokens to buyer
    */
-  private detectComplementaryTrade(buyOrder: Order, sellOrder: Order): boolean {
-    // MINT mode: Both are BUY orders for opposite outcomes
-    if (buyOrder.side === OrderSide.BUY && sellOrder.side === OrderSide.BUY) {
-      const buyingDifferentOutcomes = buyOrder.takerPositionId !== sellOrder.takerPositionId;
-      const priceSum = buyOrder.price + sellOrder.price;
-      const pricesSumTo100 = Math.abs(priceSum - 1_000_000) < 10_000; // Within 0.01 sBTC tolerance
-
-      return buyingDifferentOutcomes && pricesSumTo100;
-    }
-
-    // MERGE mode: Both are SELL orders for opposite outcomes
-    if (buyOrder.side === OrderSide.SELL && sellOrder.side === OrderSide.SELL) {
-      const sellingDifferentOutcomes = buyOrder.makerPositionId !== sellOrder.makerPositionId;
-      const priceSum = buyOrder.price + sellOrder.price;
-      const pricesSumTo100 = Math.abs(priceSum - 1_000_000) < 10_000;
-
-      return sellingDifferentOutcomes && pricesSumTo100;
-    }
-
-    return false;
-  }
 }

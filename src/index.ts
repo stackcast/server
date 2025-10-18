@@ -62,6 +62,7 @@ import { StacksSettlementService } from './services/stacksSettlement';
 import { db } from './db/client';
 import { DatabasePersistence } from './services/databasePersistence';
 import { adminRoutes } from './routes/admin';
+import { portfolioRoutes } from './routes/portfolio';
 
 dotenv.config();
 
@@ -121,6 +122,7 @@ async function bootstrap(): Promise<void> {
   app.use('/api/orderbook', orderbookRoutes);
   app.use('/api/oracle', oracleRoutes);
   app.use('/api/stacks', stacksRoutes);
+  app.use('/api/portfolio', portfolioRoutes);
   app.use('/api/admin', adminRoutes);
 
   // Health check
